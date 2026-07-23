@@ -1,0 +1,21 @@
+{
+    "name": "TileMap3D.Editor.Tests",
+    "rootNamespace": "TileMap3D.Tests",
+    "references": [
+        "TileMap3D.Runtime"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false,
+    "optionalUnityReferences": [
+        "TestAssemblies"
+    ]
+}

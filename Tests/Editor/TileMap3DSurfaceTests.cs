@@ -1,0 +1,633 @@
+using System.Collections.Generic;
+using System.Reflection;
+using NUnit.Framework;
+using UnityEngine;
+using UnityEngine.Tilemaps;
+using YokiFrame.Unity.TileMap3D;
+
+namespace TileMap3D.Tests
+{
+    /// <summary>
+    /// 验证平面 Surface 两种承载方式和原生 TilemapRenderer 的核心契约。
+    /// </summary>
+    public sealed class TileMap3DSurfaceTests
+    {
+        private GameObject root;
+        private readonly List<Object> transientObjects = new List<Object>();
+
+        /// <summary>
+        /// 每个测试使用独立根对象，避免 ExecuteAlways 组件相互影响。
+        /// </summary>
+        [SetUp]
+        public void SetUp()
+        {
+            transientObjects.Clear();
+            root = new GameObject("TileMap3D Test Root");
+            root.SetActive(false);
+        }
+
+        /// <summary>
+        /// 测试结束后立即销毁临时层级和非持久化 Mesh。
+        /// </summary>
+        [TearDown]
+        public void TearDown()
+        {
+            if (root != null)
+            {
+                Object.DestroyImmediate(root);
+            }
+
+            for (var i = 0; i < transientObjects.Count; i++)
+            {
+                if (transientObjects[i] != null)
+                {
+                    Object.DestroyImmediate(transientObjects[i]);
+                }
+            }
+
+            transientObjects.Clear();
+        }
+
+        /// <summary>
+        /// Overlay Surface 只承载 Tilemap，不应向任意目标对象注入地面组件。
+        /// </summary>
+        [Test]
+        public void OverlaySurface_DoesNotCreateGeneratedGeometry()
+        {
+            var surface = root.AddComponent<TileMap3DSurface>();
+            surface.ConfigureForCreation(
+                TileMap3DSurfaceMode.Overlay,
+                TileMap3DRenderMode.NativeTilemap);
+            root.SetActive(true);
+            surface.Rebuild();
+            surface.SetRenderMode(TileMap3DRenderMode.BakedTexture);
+
+            Assert.That(root.GetComponent<MeshFilter>(), Is.Null);
+            Assert.That(root.GetComponent<MeshRenderer>(), Is.Null);
+            Assert.That(root.GetComponent<BoxCollider>(), Is.Null);
+            Assert.That(surface.SurfaceMode, Is.EqualTo(TileMap3DSurfaceMode.Overlay));
+            Assert.That(surface.RenderMode, Is.EqualTo(TileMap3DRenderMode.SurfaceMaterial));
+        }
+
+        /// <summary>
+        /// GeneratedGround 继续创建双子网格 Mesh 和与厚度一致的 BoxCollider。
+        /// </summary>
+        [Test]
+        public void GeneratedGround_RebuildCreatesMeshAndCollider()
+        {
+            var surface = root.AddComponent<TileMap3DSurface>();
+            surface.ConfigureForCreation(
+                TileMap3DSurfaceMode.GeneratedGround,
+                TileMap3DRenderMode.NativeTilemap);
+            surface.SetGroundLayout(6, 4, 2f);
+            root.SetActive(true);
+            surface.Rebuild();
+
+            var meshFilter = root.GetComponent<MeshFilter>();
+            var boxCollider = root.GetComponent<BoxCollider>();
+            Assert.That(meshFilter, Is.Not.Null);
+            Assert.That(meshFilter.sharedMesh, Is.Not.Null);
+            Assert.That(meshFilter.sharedMesh.subMeshCount, Is.EqualTo(2));
+            Assert.That(boxCollider, Is.Not.Null);
+            Assert.That(boxCollider.size.x, Is.EqualTo(12f).Within(0.001f));
+            Assert.That(boxCollider.size.z, Is.EqualTo(8f).Within(0.001f));
+            Assert.That(boxCollider.size.y, Is.EqualTo(surface.Thickness).Within(0.001f));
+        }
+
+        /// <summary>
+        /// 原生 Base 与 Overlay 图层应使用不同深度材质，并沿 Surface 法线分层。
+        /// </summary>
+        [Test]
+        public void NativeLayers_ApplyDepthMaterialsAndNormalOffsets()
+        {
+            var surface = root.AddComponent<TileMap3DSurface>();
+            surface.ConfigureForCreation(
+                TileMap3DSurfaceMode.Overlay,
+                TileMap3DRenderMode.NativeTilemap);
+            surface.SetRenderOffsets(0.02f, 0.003f);
+
+            var gridObject = new GameObject("Grid");
+            gridObject.transform.SetParent(root.transform, false);
+            gridObject.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+            var grid = gridObject.AddComponent<Grid>();
+            var baseLayer = CreateLayer(gridObject.transform, "Base", TileMap3DLayerType.Base);
+            var overlayLayer = CreateLayer(
+                gridObject.transform,
+                "Overlay",
+                TileMap3DLayerType.Overlay);
+            surface.SetSourceGrid(grid);
+            root.SetActive(true);
+            surface.Rebuild();
+
+            var baseRenderer = baseLayer.GetComponent<TilemapRenderer>();
+            var overlayRenderer = overlayLayer.GetComponent<TilemapRenderer>();
+            Assert.That(baseRenderer.sharedMaterial, Is.Not.Null);
+            Assert.That(overlayRenderer.sharedMaterial, Is.Not.Null);
+            Assert.That(
+                baseRenderer.sharedMaterial.shader.name,
+                Is.EqualTo("TileMap3D/TilemapSurfaceCutout"));
+            Assert.That(
+                overlayRenderer.sharedMaterial.shader.name,
+                Is.EqualTo("TileMap3D/TilemapSurfaceTransparent"));
+            Assert.That(baseLayer.transform.localPosition.z, Is.EqualTo(0f).Within(0.0001f));
+            Assert.That(
+                overlayLayer.transform.localPosition.z,
+                Is.EqualTo(-0.003f).Within(0.0001f));
+            Assert.That(gridObject.transform.localPosition.y, Is.EqualTo(0.02f).Within(0.0001f));
+            Assert.That(baseRenderer.forceRenderingOff, Is.False);
+            Assert.That(overlayRenderer.forceRenderingOff, Is.False);
+        }
+
+        /// <summary>
+        /// XY 侧面挂在非等比缩放物体下时，应能把三个 Surface 局部轴恢复为单位世界长度。
+        /// </summary>
+        [Test]
+        public void NormalizeWorldScale_CompensatesAxisAlignedParentScale()
+        {
+            root.transform.localScale = new Vector3(4f, 3f, 0.5f);
+            var surfaceObject = new GameObject("Wall Surface");
+            surfaceObject.transform.SetParent(root.transform, false);
+            surfaceObject.transform.localRotation = Quaternion.Euler(-90f, 0f, 0f);
+            var surface = surfaceObject.AddComponent<TileMap3DSurface>();
+            surface.ConfigureForCreation(
+                TileMap3DSurfaceMode.Overlay,
+                TileMap3DRenderMode.NativeTilemap);
+            surface.NormalizeWorldScale();
+            root.SetActive(true);
+
+            Assert.That(
+                surface.transform.TransformVector(Vector3.right).magnitude,
+                Is.EqualTo(1f).Within(0.0001f));
+            Assert.That(
+                surface.transform.TransformVector(Vector3.up).magnitude,
+                Is.EqualTo(1f).Within(0.0001f));
+            Assert.That(
+                surface.transform.TransformVector(Vector3.forward).magnitude,
+                Is.EqualTo(1f).Within(0.0001f));
+        }
+
+        /// <summary>
+        /// XZ Overlay 应按父 Cube 的世界宽深自动得到四列三行，并落在顶面。
+        /// </summary>
+        [Test]
+        public void FitToTargetBounds_XZ_MatchesTargetSizeAndTopFace()
+        {
+            var target = CreateCubeTarget("XZ Target", new Vector3(4f, 0.5f, 3f));
+            var surface = CreateOverlaySurface(target, Quaternion.identity);
+
+            Assert.That(surface.TryFitToTargetBounds(), Is.True);
+            Assert.That(surface.Columns, Is.EqualTo(4));
+            Assert.That(surface.Rows, Is.EqualTo(3));
+            Assert.That(surface.GroundSize.x, Is.EqualTo(4f).Within(0.0001f));
+            Assert.That(surface.GroundSize.y, Is.EqualTo(3f).Within(0.0001f));
+            Assert.That(
+                Vector3.Distance(
+                    surface.transform.position,
+                    target.transform.TransformPoint(new Vector3(0f, 0.5f, 0f))),
+                Is.LessThan(0.0001f));
+        }
+
+        /// <summary>
+        /// XY Overlay 应把父 Cube 的 X/Y 尺寸映射为列/行，并落在法线朝向的外侧面。
+        /// </summary>
+        [Test]
+        public void FitToTargetBounds_XY_MatchesTargetSizeAndOuterFace()
+        {
+            var target = CreateCubeTarget("XY Target", new Vector3(4f, 3f, 0.5f));
+            var surface = CreateOverlaySurface(target, Quaternion.Euler(-90f, 0f, 0f));
+
+            Assert.That(surface.TryFitToTargetBounds(), Is.True);
+            Assert.That(surface.Columns, Is.EqualTo(4));
+            Assert.That(surface.Rows, Is.EqualTo(3));
+            Assert.That(
+                Vector3.Distance(
+                    surface.transform.position,
+                    target.transform.TransformPoint(new Vector3(0f, 0f, -0.5f))),
+                Is.LessThan(0.0001f));
+            Assert.That(
+                Vector3.Distance(surface.transform.position, target.transform.position),
+                Is.GreaterThan(0.1f));
+        }
+
+        /// <summary>
+        /// 非整格目标尺寸应向上补齐完整格，避免边缘没有可绘制单元格。
+        /// </summary>
+        [Test]
+        public void FitToTargetBounds_RoundsTargetSizeUpToWholeCells()
+        {
+            var target = CreateCubeTarget("Fractional Target", new Vector3(4.2f, 0.5f, 3.1f));
+            var surface = CreateOverlaySurface(target, Quaternion.identity);
+
+            Assert.That(surface.TryFitToTargetBounds(), Is.True);
+            Assert.That(surface.Columns, Is.EqualTo(5));
+            Assert.That(surface.Rows, Is.EqualTo(4));
+        }
+
+        /// <summary>
+        /// 父对象没有可用几何范围时，适配应失败且保留用户手动设置的布局与位置。
+        /// </summary>
+        [Test]
+        public void FitToTargetBounds_WithoutTargetGeometry_PreservesLayout()
+        {
+            var surface = CreateOverlaySurface(root, Quaternion.identity);
+            surface.SetGroundLayout(7, 5, 0.5f);
+            surface.transform.localPosition = new Vector3(1f, 2f, 3f);
+            var originalPosition = surface.transform.localPosition;
+
+            Assert.That(surface.TryFitToTargetBounds(), Is.False);
+            Assert.That(surface.Columns, Is.EqualTo(7));
+            Assert.That(surface.Rows, Is.EqualTo(5));
+            Assert.That(surface.CellSize, Is.EqualTo(0.5f).Within(0.0001f));
+            Assert.That(
+                Vector3.Distance(surface.transform.localPosition, originalPosition),
+                Is.LessThan(0.0001f));
+        }
+
+        /// <summary>
+        /// SurfaceMaterial 应隐藏源 Tilemap、归零物理偏移并保持目标 Renderer 与材质不变。
+        /// </summary>
+        [Test]
+        public void SurfaceMaterial_RendersOnTargetMeshWithoutPhysicalGridOffset()
+        {
+            var target = CreateCubeTarget("Surface Material Target", new Vector3(4f, 0.5f, 3f));
+            var targetRenderer = target.GetComponent<MeshRenderer>();
+            var originalMaterial = targetRenderer.sharedMaterial;
+            var surface = CreateOverlaySurface(
+                target,
+                Quaternion.identity,
+                TileMap3DRenderMode.SurfaceMaterial);
+            Assert.That(surface.TryFitToTargetBounds(), Is.True);
+            var tilemap = CreateSourceTilemap(surface, out var grid);
+            tilemap.SetTile(Vector3Int.zero, CreateTestTile(Color.green));
+
+            root.SetActive(true);
+            surface.Rebuild();
+
+            Assert.That(surface.IsSurfaceMaterialActive, Is.True, surface.SurfaceMaterialWarning);
+            Assert.That(surface.SurfaceMaterialWarning, Is.Empty);
+            Assert.That(grid.transform.localPosition.y, Is.EqualTo(0f).Within(0.0001f));
+            Assert.That(tilemap.GetComponent<TilemapRenderer>().forceRenderingOff, Is.True);
+            Assert.That(target.GetComponent<MeshRenderer>(), Is.SameAs(targetRenderer));
+            Assert.That(targetRenderer.sharedMaterial, Is.SameAs(originalMaterial));
+            Assert.That(target.GetComponent<BoxCollider>(), Is.Not.Null);
+        }
+
+        /// <summary>
+        /// Surface 停用后应只挂起临时 GPU 数据，再次启用时恢复同 Mesh 覆盖渲染。
+        /// </summary>
+        [Test]
+        public void SurfaceMaterial_DisableAndEnable_RestoresRenderingWithoutLifecycleErrors()
+        {
+            var target = CreateCubeTarget("Suspend Target", new Vector3(4f, 0.5f, 3f));
+            var surface = CreateOverlaySurface(
+                target,
+                Quaternion.identity,
+                TileMap3DRenderMode.SurfaceMaterial);
+            Assert.That(surface.TryFitToTargetBounds(), Is.True);
+            var tilemap = CreateSourceTilemap(surface, out _);
+            tilemap.SetTile(Vector3Int.zero, CreateTestTile(Color.cyan));
+
+            root.SetActive(true);
+            surface.Rebuild();
+            Assert.That(surface.IsSurfaceMaterialActive, Is.True, surface.SurfaceMaterialWarning);
+
+            surface.enabled = false;
+            Assert.That(surface.IsSurfaceMaterialActive, Is.False);
+            surface.enabled = true;
+            InvokePrivate(surface, "ExecuteDelayedEditorRebuild");
+
+            Assert.That(surface.IsSurfaceMaterialActive, Is.True, surface.SurfaceMaterialWarning);
+            Assert.That(tilemap.GetComponent<TilemapRenderer>().forceRenderingOff, Is.True);
+        }
+
+        /// <summary>
+        /// 图层验证阶段只能请求延迟重建，不能直接创建隐藏覆盖 Renderer；安全回调后应创建并复用带 Owner 的对象。
+        /// </summary>
+        [Test]
+        public void LayerValidation_DefersSurfaceMaterialRendererCreationUntilSafeCallback()
+        {
+            var target = CreateCubeTarget("Validation Target", new Vector3(4f, 0.5f, 3f));
+            var surfaceObject = new GameObject("Validation Surface");
+            surfaceObject.transform.SetParent(target.transform, false);
+            var surface = surfaceObject.AddComponent<TileMap3DSurface>();
+            var gridObject = new GameObject("Validation Grid");
+            gridObject.transform.SetParent(surface.transform, false);
+            gridObject.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+            var grid = gridObject.AddComponent<Grid>();
+            var layer = CreateLayer(gridObject.transform, "Validation Layer", TileMap3DLayerType.Base);
+
+            SetPrivateField(surface, "sourceGrid", grid);
+            SetPrivateField(surface, "renderMode", TileMap3DRenderMode.SurfaceMaterial);
+            root.SetActive(true);
+            InvokePrivate(surface, "CancelDelayedEditorRebuild");
+            SetPrivateField(surface, "rebuildRequested", false);
+            SetPrivateField(surface, "synchronizeSourceTileSizeOnRebuild", false);
+            InvokePrivate(layer, "OnValidate");
+
+            Assert.That(GetPrivateField<bool>(surface, "rebuildRequested"), Is.True);
+            Assert.That(
+                target.GetComponentsInChildren<TileMap3DSurfaceMaterialRendererOwner>(true),
+                Is.Empty);
+
+            InvokePrivate(surface, "ExecuteDelayedEditorRebuild");
+
+            var owners = target.GetComponentsInChildren<TileMap3DSurfaceMaterialRendererOwner>(true);
+            Assert.That(owners, Has.Length.EqualTo(1));
+            Assert.That(owners[0].Surface, Is.SameAs(surface));
+            var firstRendererObject = owners[0].gameObject;
+            Assert.That(firstRendererObject.hideFlags, Is.EqualTo(HideFlags.HideAndDontSave));
+
+            surface.Rebuild();
+
+            var rebuiltOwners = target.GetComponentsInChildren<TileMap3DSurfaceMaterialRendererOwner>(true);
+            Assert.That(rebuiltOwners, Has.Length.EqualTo(1));
+            Assert.That(rebuiltOwners[0].gameObject, Is.SameAs(firstRendererObject));
+        }
+
+        /// <summary>
+        /// 场景保存完成后应重新排队 SurfaceMaterial 重建，恢复不会被序列化的运行时材质参数。
+        /// </summary>
+        [Test]
+        public void SceneSaved_RequestsDelayedSurfaceMaterialRebuild()
+        {
+            var target = CreateCubeTarget("Scene Saved Target", new Vector3(4f, 0.5f, 3f));
+            var surface = CreateOverlaySurface(
+                target,
+                Quaternion.identity,
+                TileMap3DRenderMode.SurfaceMaterial);
+            Assert.That(surface.TryFitToTargetBounds(), Is.True);
+            var tilemap = CreateSourceTilemap(surface, out _);
+            tilemap.SetTile(Vector3Int.zero, CreateTestTile(Color.yellow));
+
+            root.SetActive(true);
+            surface.Rebuild();
+            InvokePrivate(surface, "CancelDelayedEditorRebuild");
+            SetPrivateField(surface, "rebuildRequested", false);
+
+            InvokePrivate(surface, "HandleSceneSaved", surface.gameObject.scene);
+
+            Assert.That(GetPrivateField<bool>(surface, "rebuildRequested"), Is.True);
+            Assert.That(GetPrivateField<bool>(surface, "delayedEditorRebuildScheduled"), Is.True);
+
+            InvokePrivate(surface, "ExecuteDelayedEditorRebuild");
+
+            Assert.That(GetPrivateField<bool>(surface, "rebuildRequested"), Is.False);
+            Assert.That(surface.IsSurfaceMaterialActive, Is.True, surface.SurfaceMaterialWarning);
+        }
+
+        /// <summary>
+        /// 新后端首次接管时应删除旧版持久 Renderer，并换成不会进入场景 YAML 的临时对象。
+        /// </summary>
+        [Test]
+        public void SurfaceMaterial_LegacyRenderer_IsRecreatedAsTemporaryObject()
+        {
+            var target = CreateCubeTarget("Legacy Renderer Target", new Vector3(4f, 0.5f, 3f));
+            var surface = CreateOverlaySurface(
+                target,
+                Quaternion.identity,
+                TileMap3DRenderMode.SurfaceMaterial);
+            Assert.That(surface.TryFitToTargetBounds(), Is.True);
+            var tilemap = CreateSourceTilemap(surface, out _);
+            tilemap.SetTile(Vector3Int.zero, CreateTestTile(Color.blue));
+
+            root.SetActive(true);
+            surface.Rebuild();
+            var legacyObject = target
+                .GetComponentInChildren<TileMap3DSurfaceMaterialRendererOwner>(true)
+                .gameObject;
+            surface.enabled = false;
+            legacyObject.hideFlags = HideFlags.HideInHierarchy;
+            SetPrivateField<object>(surface, "surfaceMaterialBackend", null);
+
+            surface.enabled = true;
+            InvokePrivate(surface, "ExecuteDelayedEditorRebuild");
+
+            var owner = target.GetComponentInChildren<TileMap3DSurfaceMaterialRendererOwner>(true);
+            Assert.That(legacyObject == null, Is.True);
+            Assert.That(owner, Is.Not.Null);
+            Assert.That(owner.gameObject.hideFlags, Is.EqualTo(HideFlags.HideAndDontSave));
+            Assert.That(surface.IsSurfaceMaterialActive, Is.True, surface.SurfaceMaterialWarning);
+        }
+
+        /// <summary>
+        /// 编辑态更新应恢复场景保存可能清零的固定材质参数，不依赖用户重新绘制或切换场景。
+        /// </summary>
+        [Test]
+        public void SurfaceMaterial_Update_RestoresParametersClearedBySceneSave()
+        {
+            var target = CreateCubeTarget("Material Recovery Target", new Vector3(4f, 0.5f, 3f));
+            var surface = CreateOverlaySurface(
+                target,
+                Quaternion.identity,
+                TileMap3DRenderMode.SurfaceMaterial);
+            Assert.That(surface.TryFitToTargetBounds(), Is.True);
+            var tilemap = CreateSourceTilemap(surface, out _);
+            tilemap.SetTile(Vector3Int.zero, CreateTestTile(Color.red));
+
+            root.SetActive(true);
+            surface.Rebuild();
+            InvokePrivate(surface, "CancelDelayedEditorRebuild");
+            SetPrivateField(surface, "rebuildRequested", false);
+            SetPrivateField(surface, "synchronizeSourceTileSizeOnRebuild", false);
+            var backend = GetPrivateField<object>(surface, "surfaceMaterialBackend");
+            var materialField = backend.GetType().GetField(
+                "material",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(materialField, Is.Not.Null);
+            var material = (Material)materialField.GetValue(backend);
+            Assert.That(material, Is.Not.Null);
+            Assert.That(material.HasProperty("_SurfaceRect"), Is.True);
+            Assert.That(material.HasProperty("_CellDimensions"), Is.True);
+            Assert.That(material.HasProperty("_SpriteCount"), Is.True);
+            material.SetVector("_SurfaceRect", Vector4.zero);
+            material.SetVector("_CellDimensions", Vector4.zero);
+            material.SetFloat("_SpriteCount", 0f);
+
+            InvokePrivate(surface, "Update");
+
+            Assert.That(material.GetVector("_SurfaceRect").sqrMagnitude, Is.GreaterThan(0f));
+            Assert.That(material.GetVector("_CellDimensions").x, Is.EqualTo(surface.Columns));
+            Assert.That(material.GetVector("_CellDimensions").y, Is.EqualTo(surface.Rows));
+            Assert.That(material.GetFloat("_SpriteCount"), Is.GreaterThan(1f));
+        }
+
+        /// <summary>
+        /// 目标 Mesh 从不支持状态恢复后，SurfaceMaterial 应清除 Native 回退留下的物理偏移。
+        /// </summary>
+        [Test]
+        public void SurfaceMaterial_RecoveryFromFallback_ClearsGridOffset()
+        {
+            var target = CreateCubeTarget("Fallback Target", new Vector3(4f, 0.5f, 3f));
+            var meshFilter = target.GetComponent<MeshFilter>();
+            var targetMesh = meshFilter.sharedMesh;
+            meshFilter.sharedMesh = null;
+            var surface = CreateOverlaySurface(
+                target,
+                Quaternion.identity,
+                TileMap3DRenderMode.SurfaceMaterial);
+            Assert.That(surface.TryFitToTargetBounds(), Is.True);
+            var tilemap = CreateSourceTilemap(surface, out var grid);
+            tilemap.SetTile(Vector3Int.zero, CreateTestTile(Color.magenta));
+
+            root.SetActive(true);
+            surface.Rebuild();
+            Assert.That(surface.IsSurfaceMaterialActive, Is.False);
+            Assert.That(grid.transform.localPosition.y, Is.EqualTo(surface.SurfaceOffset).Within(0.0001f));
+
+            meshFilter.sharedMesh = targetMesh;
+            surface.Rebuild();
+
+            Assert.That(surface.IsSurfaceMaterialActive, Is.True, surface.SurfaceMaterialWarning);
+            Assert.That(grid.transform.localPosition.y, Is.EqualTo(0f).Within(0.0001f));
+            Assert.That(tilemap.GetComponent<TilemapRenderer>().forceRenderingOff, Is.True);
+        }
+
+        /// <summary>
+        /// 世界坐标查询应返回命中的 Tile、Cell 和 Profile 配置的通用地面语义。
+        /// </summary>
+        [Test]
+        public void SurfaceQuery_ReturnsTileCellAndConfiguredSurfaceId()
+        {
+            var target = CreateCubeTarget("Surface Query Target", new Vector3(4f, 0.5f, 3f));
+            var surface = CreateOverlaySurface(target, Quaternion.identity);
+            Assert.That(surface.TryFitToTargetBounds(), Is.True);
+            var tilemap = CreateSourceTilemap(surface, out var grid);
+            var tile = CreateTestTile(Color.gray);
+            var cell = Vector3Int.zero;
+            tilemap.SetTile(cell, tile);
+            var profile = ScriptableObject.CreateInstance<TileMap3DSurfaceProfile>();
+            transientObjects.Add(profile);
+            profile.SetSurfaceId(tile, "Stone");
+            surface.SetSurfaceProfile(profile);
+
+            root.SetActive(true);
+            surface.Rebuild();
+            var worldPosition = grid.GetCellCenterWorld(cell);
+
+            Assert.That(surface.TryGetSurfaceInfo(worldPosition, out var info), Is.True);
+            Assert.That(info.Surface, Is.SameAs(surface));
+            Assert.That(info.Tilemap, Is.SameAs(tilemap));
+            Assert.That(info.Tile, Is.SameAs(tile));
+            Assert.That(info.Cell, Is.EqualTo(cell));
+            Assert.That(info.SurfaceId, Is.EqualTo("Stone"));
+        }
+
+        /// <summary>
+        /// 创建带标准 Cube Mesh、Renderer 和 BoxCollider 的目标对象。
+        /// </summary>
+        private GameObject CreateCubeTarget(string name, Vector3 scale)
+        {
+            var target = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            target.name = name;
+            target.transform.SetParent(root.transform, false);
+            target.transform.localScale = scale;
+            return target;
+        }
+
+        /// <summary>
+        /// 在目标下创建指定局部方向的 Overlay Surface，不额外生成 Grid 或 Tilemap。
+        /// </summary>
+        private static TileMap3DSurface CreateOverlaySurface(
+            GameObject target,
+            Quaternion rotation,
+            TileMap3DRenderMode renderMode = TileMap3DRenderMode.NativeTilemap)
+        {
+            var surfaceObject = new GameObject("Overlay Surface");
+            surfaceObject.transform.SetParent(target.transform, false);
+            surfaceObject.transform.localRotation = rotation;
+            var surface = surfaceObject.AddComponent<TileMap3DSurface>();
+            surface.ConfigureForCreation(
+                TileMap3DSurfaceMode.Overlay,
+                renderMode);
+            return surface;
+        }
+
+        /// <summary>
+        /// 为 Surface 创建标准旋转 Grid 和单个 Base Tilemap，并立即绑定数据源。
+        /// </summary>
+        private static Tilemap CreateSourceTilemap(TileMap3DSurface surface, out Grid grid)
+        {
+            var gridObject = new GameObject("Tilemap Source");
+            gridObject.transform.SetParent(surface.transform, false);
+            gridObject.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+            grid = gridObject.AddComponent<Grid>();
+            var layer = CreateLayer(gridObject.transform, "Base", TileMap3DLayerType.Base);
+            surface.SetSourceGrid(grid);
+            return layer.GetComponent<Tilemap>();
+        }
+
+        /// <summary>
+        /// 创建包含单色可读纹理和 Sprite 的临时 Tile，并登记到测试清理列表。
+        /// </summary>
+        private Tile CreateTestTile(Color color)
+        {
+            var texture = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+            texture.SetPixels(new[] { color, color, color, color });
+            texture.Apply();
+            var sprite = Sprite.Create(
+                texture,
+                new Rect(0f, 0f, 2f, 2f),
+                new Vector2(0.5f, 0.5f),
+                2f);
+            var tile = ScriptableObject.CreateInstance<Tile>();
+            tile.sprite = sprite;
+            transientObjects.Add(tile);
+            transientObjects.Add(sprite);
+            transientObjects.Add(texture);
+            return tile;
+        }
+
+        /// <summary>
+        /// 创建一个真实原生 Tilemap 图层，供深度材质和偏移测试复用。
+        /// </summary>
+        private static TileMap3DLayer CreateLayer(
+            Transform parent,
+            string name,
+            TileMap3DLayerType layerType)
+        {
+            var layerObject = new GameObject(name);
+            layerObject.transform.SetParent(parent, false);
+            layerObject.AddComponent<Tilemap>();
+            layerObject.AddComponent<TilemapRenderer>();
+            var layer = layerObject.AddComponent<TileMap3DLayer>();
+            layer.Configure(layerType);
+            return layer;
+        }
+
+        /// <summary>
+        /// 为生命周期回归测试写入未暴露的序列化字段，避免测试本身调用会立即重建的公开编辑命令。
+        /// </summary>
+        private static void SetPrivateField<T>(object target, string fieldName, T value)
+        {
+            var field = target.GetType().GetField(
+                fieldName,
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(field, Is.Not.Null, "找不到测试字段：" + fieldName);
+            field.SetValue(target, value);
+        }
+
+        /// <summary>
+        /// 读取生命周期状态字段，确认验证回调只记录了待处理重建请求。
+        /// </summary>
+        private static T GetPrivateField<T>(object target, string fieldName)
+        {
+            var field = target.GetType().GetField(
+                fieldName,
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(field, Is.Not.Null, "找不到测试字段：" + fieldName);
+            return (T)field.GetValue(target);
+        }
+
+        /// <summary>
+        /// 直接触发私有生命周期回调，用于验证 Unity 安全阶段前后的重建时机。
+        /// </summary>
+        private static void InvokePrivate(object target, string methodName, params object[] arguments)
+        {
+            var method = target.GetType().GetMethod(
+                methodName,
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(method, Is.Not.Null, "找不到测试方法：" + methodName);
+            method.Invoke(target, arguments);
+        }
+    }
+}
