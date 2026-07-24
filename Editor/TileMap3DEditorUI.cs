@@ -80,7 +80,8 @@ namespace YokiFrame.Unity.TileMap3D
             root.AddToClassList("tilemap3d-editor-root");
             root.style.flexDirection = FlexDirection.Column;
             root.style.color = new StyleColor(Colors.TextPrimary);
-            root.style.backgroundColor = new StyleColor(Colors.Panel);
+            // 根层保持透明，沿用 Unity Inspector 或 EditorWindow 的宿主背景。
+            root.style.backgroundColor = new StyleColor(StyleKeyword.Null);
             root.style.paddingLeft = profile == TileMap3DEditorStyleProfile.Full ? Spacing.MD : Spacing.SM;
             root.style.paddingRight = profile == TileMap3DEditorStyleProfile.Full ? Spacing.MD : Spacing.SM;
             root.style.paddingTop = Spacing.SM;

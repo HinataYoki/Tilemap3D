@@ -19,6 +19,11 @@ namespace YokiFrame.Unity.TileMap3D
         private const int MaximumLayers = 8;
         private const int MaximumSourceTextures = 8;
         private const int MaximumSpriteIndex = ushort.MaxValue;
+        private const int SpriteLookupRowCount = 3;
+        private const int DataTextureCount = 3;
+        private const int BytesPerRgba32Pixel = 4;
+        private const int CpuAndGpuCopies = 2;
+        private const long MaximumDataMemoryBytes = 256L * 1024L * 1024L;
         private const float DefaultNormalThreshold = 0.9f;
         private const float MinimumPlaneTolerance = 0.001f;
 
@@ -33,6 +38,8 @@ namespace YokiFrame.Unity.TileMap3D
         private static readonly int PlaneToleranceId = Shader.PropertyToID("_PlaneTolerance");
         private static readonly int NormalThresholdId = Shader.PropertyToID("_NormalThreshold");
         private static readonly int SpriteCountId = Shader.PropertyToID("_SpriteCount");
+        private static readonly int ReceiveShadowsId = Shader.PropertyToID(
+            "_TileMap3DReceiveShadows");
 
         private readonly TileMap3DSurface surface;
         private readonly List<AnimatedCell> animatedCells = new List<AnimatedCell>();
@@ -115,10 +122,22 @@ namespace YokiFrame.Unity.TileMap3D
 
             layerCount = tilemaps.Count;
             var textureDepth = Mathf.Max(1, layerCount);
+            var cellCountLong = (long)columns * rows;
+            var estimatedDataBytes = cellCountLong * textureDepth * DataTextureCount
+                * BytesPerRgba32Pixel * CpuAndGpuCopies;
+            if (estimatedDataBytes > MaximumDataMemoryBytes)
+            {
+                return Fail(
+                    "Cell 区域 " + columns + " × " + rows + " × " + textureDepth
+                    + " 层预计需要 " + FormatMemorySize(estimatedDataBytes)
+                    + " 的 SurfaceMaterial 数据，超过 " + FormatMemorySize(MaximumDataMemoryBytes)
+                    + " 上限，已回退原生 TilemapRenderer。");
+            }
+
             cellPixels = new Color32[textureDepth][];
             var transformPixels = new Color32[textureDepth][];
             var colorPixels = new Color32[textureDepth][];
-            var cellCount = columns * rows;
+            var cellCount = (int)cellCountLong;
             for (var layerIndex = 0; layerIndex < textureDepth; layerIndex++)
             {
                 cellPixels[layerIndex] = new Color32[cellCount];
@@ -514,7 +533,7 @@ namespace YokiFrame.Unity.TileMap3D
         }
 
         /// <summary>
-        /// 创建 Sprite 索引到 UV Rect 和源纹理槽位的两行查询纹理。
+        /// 创建 Sprite 索引到 UV Rect、源纹理槽位和原生几何边界的查询纹理。
         /// </summary>
         private bool CreateSpriteLookup(
             List<Sprite> sprites,
@@ -522,7 +541,7 @@ namespace YokiFrame.Unity.TileMap3D
         {
             spriteLookup = new Texture2D(
                 Mathf.Max(1, sprites.Count),
-                2,
+                SpriteLookupRowCount,
                 TextureFormat.RGBAHalf,
                 false,
                 true)
@@ -549,10 +568,87 @@ namespace YokiFrame.Unity.TileMap3D
                     spriteIndex,
                     1,
                     new Color(textureSlots[texture], 0f, 0f, 0f));
+                spriteLookup.SetPixel(
+                    spriteIndex,
+                    2,
+                    CalculateNormalizedSpriteGeometry(
+                        sprite.vertices,
+                        GetSpriteCellSize(sprite),
+                        GetNormalizedSpritePivot(sprite)));
             }
 
             spriteLookup.Apply(false, false);
             return true;
+        }
+
+        /// <summary>
+        /// 把原生 Sprite 顶点范围归一化到完整 Cell，避免 Tight Mesh 的裁切区域被铺满后放大。
+        /// </summary>
+        private static Vector4 CalculateNormalizedSpriteGeometry(
+            Vector2[] vertices,
+            Vector2 sourceCellSize,
+            Vector2 normalizedPivot)
+        {
+            if (vertices == null || vertices.Length == 0)
+            {
+                return new Vector4(0f, 0f, 1f, 1f);
+            }
+
+            var minimum = vertices[0];
+            var maximum = vertices[0];
+            for (var i = 1; i < vertices.Length; i++)
+            {
+                minimum = Vector2.Min(minimum, vertices[i]);
+                maximum = Vector2.Max(maximum, vertices[i]);
+            }
+
+            var sourceWidth = Mathf.Max(MinimumPlaneTolerance, Mathf.Abs(sourceCellSize.x));
+            var sourceHeight = Mathf.Max(MinimumPlaneTolerance, Mathf.Abs(sourceCellSize.y));
+            var normalizedMinimum = new Vector2(
+                minimum.x / sourceWidth + normalizedPivot.x,
+                minimum.y / sourceHeight + normalizedPivot.y);
+            var normalizedMaximum = new Vector2(
+                maximum.x / sourceWidth + normalizedPivot.x,
+                maximum.y / sourceHeight + normalizedPivot.y);
+            if (normalizedMaximum.x - normalizedMinimum.x < MinimumPlaneTolerance
+                || normalizedMaximum.y - normalizedMinimum.y < MinimumPlaneTolerance)
+            {
+                return new Vector4(0f, 0f, 1f, 1f);
+            }
+
+            return new Vector4(
+                Mathf.Clamp01(normalizedMinimum.x),
+                Mathf.Clamp01(normalizedMinimum.y),
+                Mathf.Clamp01(normalizedMaximum.x),
+                Mathf.Clamp01(normalizedMaximum.y));
+        }
+
+        /// <summary>
+        /// 返回 Sprite 完整 Rect 对应的世界尺寸；不能使用 Tight Mesh 自身的 Bounds，否则会丢失透明边界。
+        /// </summary>
+        private static Vector2 GetSpriteCellSize(Sprite sprite)
+        {
+            return new Vector2(
+                sprite.rect.width / Mathf.Max(MinimumPlaneTolerance, sprite.pixelsPerUnit),
+                sprite.rect.height / Mathf.Max(MinimumPlaneTolerance, sprite.pixelsPerUnit));
+        }
+
+        /// <summary>
+        /// 将 Sprite Pivot 归一化到完整 Rect，供紧凑网格顶点恢复其在 Cell 中的实际偏移。
+        /// </summary>
+        private static Vector2 GetNormalizedSpritePivot(Sprite sprite)
+        {
+            return new Vector2(
+                sprite.pivot.x / Mathf.Max(1f, sprite.rect.width),
+                sprite.pivot.y / Mathf.Max(1f, sprite.rect.height));
+        }
+
+        /// <summary>
+        /// 格式化 GPU 与 CPU 纹理总占用预估，便于用户调整固定区域或切换后端。
+        /// </summary>
+        private static string FormatMemorySize(long bytes)
+        {
+            return (bytes / (1024f * 1024f)).ToString("0.0") + " MiB";
         }
 
         /// <summary>
@@ -667,7 +763,7 @@ namespace YokiFrame.Unity.TileMap3D
 
             backendMeshFilter.sharedMesh = targetMesh;
             backendRenderer.shadowCastingMode = ShadowCastingMode.Off;
-            backendRenderer.receiveShadows = false;
+            backendRenderer.receiveShadows = targetRenderer.receiveShadows;
             backendRenderer.lightProbeUsage = LightProbeUsage.Off;
             backendRenderer.reflectionProbeUsage = ReflectionProbeUsage.Off;
             backendRenderer.motionVectorGenerationMode = MotionVectorGenerationMode.ForceNoMotion;
@@ -843,6 +939,8 @@ namespace YokiFrame.Unity.TileMap3D
             backendRenderer.renderingLayerMask = targetRenderer.renderingLayerMask;
             backendRenderer.sortingLayerID = targetRenderer.sortingLayerID;
             backendRenderer.sortingOrder = targetRenderer.sortingOrder + 1;
+            backendRenderer.receiveShadows = targetRenderer.receiveShadows;
+            material.SetFloat(ReceiveShadowsId, targetRenderer.receiveShadows ? 1f : 0f);
             backendRenderer.enabled = surface.isActiveAndEnabled && targetRenderer.enabled;
         }
 

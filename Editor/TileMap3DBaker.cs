@@ -365,8 +365,7 @@ namespace YokiFrame.Unity.TileMap3D
             EnsureAssetFolder(outputFolder);
             Undo.RecordObject(surface, "烘焙 TileMap3D 地面");
             var bakeId = surface.EnsureBakeId();
-            var shortId = bakeId.Length > 8 ? bakeId.Substring(0, 8) : bakeId;
-            var baseName = SanitizeFileName(surface.name) + "_" + shortId;
+            var baseName = GetBakeAssetBaseName(surface);
             var texturePath = outputFolder + "/" + baseName + "_Albedo.png";
             var materialPath = outputFolder + "/" + baseName + "_Surface.mat";
             File.WriteAllBytes(Path.GetFullPath(texturePath), readableTexture.EncodeToPNG());
@@ -496,6 +495,18 @@ namespace YokiFrame.Unity.TileMap3D
             }
 
             return builder.Length > 0 ? builder.ToString() : "TileMap3D";
+        }
+
+        /// <summary>
+        /// 使用场景或 Prefab 对象的稳定全局标识生成烘焙文件名，避免复制同名 Surface 后覆盖彼此资产。
+        /// </summary>
+        private static string GetBakeAssetBaseName(TileMap3DSurface surface)
+        {
+            var globalId = GlobalObjectId.GetGlobalObjectIdSlow(surface).ToString();
+            var uniqueId = globalId.StartsWith("GlobalObjectId_V1-0-", StringComparison.Ordinal)
+                ? surface.GetEntityId().GetHashCode().ToString("X")
+                : Hash128.Compute(globalId).ToString().Substring(0, 12);
+            return SanitizeFileName(surface.name) + "_" + uniqueId;
         }
 
         /// <summary>

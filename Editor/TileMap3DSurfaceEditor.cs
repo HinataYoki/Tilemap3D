@@ -36,6 +36,7 @@ namespace YokiFrame.Unity.TileMap3D
             AddProperty(root, "surfaceProfile", "地面语义 Profile");
             AddProperty(root, "surfaceQueryLayer", "玩法查询图层");
             AddProperty(root, "showSourcePreview", "显示原生 Tilemap");
+            AddProperty(root, "showOutOfBoundsTilePreview", "显示越界 Tile 警示");
             AddProperty(root, "surfaceOffset", "表面偏移");
             AddProperty(root, "layerSpacing", "图层间距");
             if (surface.SurfaceMode == TileMap3DSurfaceMode.GeneratedGround)

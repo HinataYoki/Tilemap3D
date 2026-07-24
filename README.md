@@ -77,15 +77,16 @@ TileMap3D 会从当前 Tile Palette Brush 或已绘制 Sprite 自动检测源 Ti
 
 每个 Tilemap 图层都有一个 `TileMap3DLayer` 类型：
 
-| 类型 | 用途 | 深度行为 |
+| 渲染类型 | 用途 | 深度行为 |
 |---|---|---|
 | `Base` | 地砖、泥土、草地等基础图层 | Alpha Clip、ZWrite On |
-| `Overlay` | 边缘、裂纹、草叶等透明细节 | Alpha Blend、ZWrite Off、ZTest LEqual |
-| `Effect` | AnimatedTile、发光和半透明效果 | 与 Overlay 相同，保留动态 Tilemap |
+| `Overlay` | 边缘、裂纹、草叶、AnimatedTile 和半透明效果 | Alpha Blend、ZWrite Off、ZTest LEqual |
 
 `SurfaceMaterial` 会按 Hierarchy 顺序把最多 8 个可见图层在同一个目标 Mesh Pass 中进行 Alpha 合成。它保存的是“列数 × 行数 × 图层数”的索引数据，不会按每格像素数复制一张大地图颜色贴图。一个 Surface 当前最多引用 8 张源纹理；使用 SpriteAtlas 可以明显减少纹理槽数量。
 
-`NativeTilemap` 是兼容后端。Base 使用 `TileMap3D/TilemapSurfaceCutout`，Overlay 与 Effect 使用 `TileMap3D/TilemapSurfaceTransparent`，并通过真实法线偏移分层。它适合不受 SurfaceMaterial 支持范围覆盖的 Sprite、目标对象或平台。
+每个真实 Tilemap 都是独立图层，层数由 Source Grid 下的 Tilemap 数量决定，不由渲染类型下拉框限制。工作台只提供 `Base` 和 `Overlay` 两种渲染类型；旧场景中的 `Effect` 会自动作为 `Overlay` 兼容处理。
+
+`NativeTilemap` 是兼容后端。Base 使用 `TileMap3D/TilemapSurfaceCutout`，Overlay 使用 `TileMap3D/TilemapSurfaceTransparent`，并通过真实法线偏移分层。它适合不受 SurfaceMaterial 支持范围覆盖的 Sprite、目标对象或平台。
 
 不同高度、不同方向的 Surface 依靠真实 3D 深度遮挡。Sorting Order 只用于同一 Surface 内部的图层关系，不应拿来强制覆盖另一个空间平面。
 
@@ -107,9 +108,18 @@ Overlay 的 `SurfaceMaterial` 模式保留 Unity Tilemap 作为唯一数据源�
 - Tile 颜色、90 度旋转、翻转和矩形 SpriteAtlas 可以继续使用。
 - 源 TilemapRenderer 仅作为编辑数据与兼容回退，不作为最终显示平面。
 
-`NativeTilemap` 则直接使用 Unity TilemapRenderer 的动画、Chunk 合批和视锥裁剪。SurfaceMaterial 遇到无 MeshFilter、旋转/Tight Atlas、超过 8 个图层、超过 8 张源纹理或平台不支持 Texture2DArray 时，会显示原因并自动回退到 NativeTilemap，避免静默渲染错误。
+`NativeTilemap` 则直接使用 Unity TilemapRenderer 的动画、Chunk 合批和视锥裁剪。SurfaceMaterial 遇到无 MeshFilter、旋转/Tight Atlas、超过 8 个图层、超过 8 张源纹理、按格数据预计超过 256 MiB 或平台不支持 Texture2DArray 时，会显示原因并自动回退到 NativeTilemap，避免静默渲染错误。
 
 TileMap3D 不建立第二套格子数据或规则系统，也不会为每个 Tile 创建 GameObject。
+
+## 越界 Tile 检查
+
+固定“列数”和“行数”定义的是 Surface 可显示的唯一矩形区域。Tile Palette 仍可在该区域外写入 Tilemap 数据，但 `SurfaceMaterial` 不会显示这些格子。
+
+- 在工作台“原生 Tilemap 图层”区域打开“显示越界 Tile 警示”，Scene View 会以橙红色格标出全部图层中落在范围外的非空 Tile，同时用橙色边框显示合法区域。
+- “越界 Tile”数量按图层统计；同一 Cell 在两个图层都有 Tile 时会计为两个，清理时也会同时删除。
+- 点击“清理越界 Tile”后确认，工具会删除全部源图层的越界数据，并支持 Unity `Undo` 恢复。
+- 警示仅用于编辑器 Scene View，不会开启原生 `TilemapRenderer`、改变 SurfaceMaterial 渲染，也不会进入打包内容。
 
 ## 地面语义与脚步声
 
@@ -131,6 +141,9 @@ if (Physics.Raycast(origin, Vector3.down, out var hit, distance, groundMask)
 
 - Overlay 模式完全使用目标物体已有的 Mesh 和 3D Collider。
 - GeneratedGround 模式生成封闭 Mesh 和 BoxCollider，厚度沿本地负 Y 延伸。
+- `NativeTilemap` 与 `SurfaceMaterial` 使用 URP 3D 光照，会接受环境光、主方向光和附加点光/聚光灯；指定 `Material Override` 时，由该材质决定是否仍受光。
+- `NativeTilemap` 是否接收实时阴影由各图层的 `TileMap3DLayer.Receive Shadows` 控制，默认开启；该设置会同步到 `TilemapRenderer` 和自定义 Shader。紧贴 GeneratedGround 顶面不会产生自阴影，只有实际遮挡物会投下阴影。
+- `SurfaceMaterial` 是否接收实时阴影跟随目标 `MeshRenderer`。实时 Tile 图层本身不投射阴影，避免透明轮廓和多层叠加产生错误阴影。
 - 不转换 TilemapCollider2D。
 - Tile 生成的 GameObject 仍然作为独立场景对象存在。
 - 高速 Rigidbody 仍应使用 Continuous 或 Continuous Dynamic 碰撞检测。

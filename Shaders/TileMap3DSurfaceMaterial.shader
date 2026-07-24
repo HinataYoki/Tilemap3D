@@ -15,6 +15,7 @@ Shader "TileMap3D/SurfaceMaterial"
         [NoScaleOffset] _TileTexture6("Tile Texture 6", 2D) = "white" {}
         [NoScaleOffset] _TileTexture7("Tile Texture 7", 2D) = "white" {}
         _Tint("Tint", Color) = (1, 1, 1, 1)
+        [HideInInspector] _TileMap3DReceiveShadows("Receive Shadows", Float) = 1
         [HideInInspector] _SurfaceRect("Surface Rect", Vector) = (0, 0, 0, 0)
         [HideInInspector] _SurfaceNormalWS("Surface Normal WS", Vector) = (0, 1, 0, 0)
         [HideInInspector] _CellDimensions("Cell Dimensions", Vector) = (1, 1, 0, 1)
@@ -46,9 +47,14 @@ Shader "TileMap3D/SurfaceMaterial"
             #pragma target 4.5
             #pragma vertex TileMap3DVertex
             #pragma fragment TileMap3DFragment
+            #pragma multi_compile _ _MAIN_LIGHT_SHADOWS _MAIN_LIGHT_SHADOWS_CASCADE _MAIN_LIGHT_SHADOWS_SCREEN
+            #pragma multi_compile _ _ADDITIONAL_LIGHTS_VERTEX _ADDITIONAL_LIGHTS
+            #pragma multi_compile _ _ADDITIONAL_LIGHT_SHADOWS
+            #pragma multi_compile _ _SHADOWS_SOFT
             #pragma multi_compile_fog
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
 
             TEXTURE2D_ARRAY(_CellData);
             SAMPLER(sampler_CellData);
@@ -81,6 +87,7 @@ Shader "TileMap3D/SurfaceMaterial"
                 float4 _SurfaceNormalWS;
                 float4 _CellDimensions;
                 float4 _Tint;
+                half _TileMap3DReceiveShadows;
                 float _PlaneTolerance;
                 float _NormalThreshold;
                 float _SpriteCount;
@@ -109,6 +116,31 @@ Shader "TileMap3D/SurfaceMaterial"
                 output.normalWS = TransformObjectToWorldNormal(input.normalOS);
                 output.fogFactor = ComputeFogFactor(output.positionCS.z);
                 return output;
+            }
+
+            half3 CalculateLighting(float3 positionWS, half3 normalWS)
+            {
+                float4 shadowCoord = TransformWorldToShadowCoord(positionWS);
+                Light mainLight = GetMainLight(shadowCoord);
+                half3 lighting = SampleSH(normalWS);
+                lighting += mainLight.color
+                    * saturate(dot(normalWS, mainLight.direction))
+                    * mainLight.distanceAttenuation
+                    * lerp(1.0h, mainLight.shadowAttenuation, _TileMap3DReceiveShadows);
+
+                #if defined(_ADDITIONAL_LIGHTS)
+                uint lightCount = GetAdditionalLightsCount();
+                for (uint lightIndex = 0u; lightIndex < lightCount; lightIndex++)
+                {
+                    Light light = GetAdditionalLight(lightIndex, positionWS);
+                    lighting += light.color
+                        * saturate(dot(normalWS, light.direction))
+                        * light.distanceAttenuation
+                        * lerp(1.0h, light.shadowAttenuation, _TileMap3DReceiveShadows);
+                }
+                #endif
+
+                return lighting;
             }
 
             half4 SampleTileTexture(int textureSlot, float2 uv)
@@ -220,14 +252,31 @@ Shader "TileMap3D/SurfaceMaterial"
                     float4 spriteRect = SAMPLE_TEXTURE2D_LOD(
                         _SpriteLookup,
                         sampler_SpriteLookup,
-                        float2(lookupX, 0.25),
+                        float2(lookupX, 1.0 / 6.0),
                         0);
                     float4 spriteMeta = SAMPLE_TEXTURE2D_LOD(
                         _SpriteLookup,
                         sampler_SpriteLookup,
-                        float2(lookupX, 0.75),
+                        float2(lookupX, 0.5),
                         0);
-                    float2 spriteUv = lerp(spriteRect.xy, spriteRect.zw, transformedUv);
+                    float4 spriteGeometry = SAMPLE_TEXTURE2D_LOD(
+                        _SpriteLookup,
+                        sampler_SpriteLookup,
+                        float2(lookupX, 5.0 / 6.0),
+                        0);
+                    if (transformedUv.x < spriteGeometry.x
+                        || transformedUv.y < spriteGeometry.y
+                        || transformedUv.x > spriteGeometry.z
+                        || transformedUv.y > spriteGeometry.w)
+                    {
+                        continue;
+                    }
+
+                    float2 geometrySize = max(
+                        spriteGeometry.zw - spriteGeometry.xy,
+                        float2(0.00001, 0.00001));
+                    float2 geometryUv = (transformedUv - spriteGeometry.xy) / geometrySize;
+                    float2 spriteUv = lerp(spriteRect.xy, spriteRect.zw, geometryUv);
                     half4 tileColor = SampleTileTexture((int)round(spriteMeta.x), spriteUv);
                     tileColor *= SAMPLE_TEXTURE2D_ARRAY_LOD(
                         _ColorData,
@@ -244,7 +293,10 @@ Shader "TileMap3D/SurfaceMaterial"
                 clip(result.a - 0.001h);
                 // 多层合成在这里保存的是预乘颜色；输出前还原为普通透明颜色，
                 // 才能与目标 Mesh 的 SrcAlpha 混合保持半透明 Tile 的亮度。
-                result.rgb = MixFog(result.rgb / max(result.a, 0.001h), input.fogFactor);
+                result.rgb = MixFog(
+                    result.rgb / max(result.a, 0.001h)
+                    * CalculateLighting(input.positionWS, normalize(input.normalWS)),
+                    input.fogFactor);
                 return result;
             }
             ENDHLSL

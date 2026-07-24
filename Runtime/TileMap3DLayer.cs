@@ -11,6 +11,7 @@ namespace YokiFrame.Unity.TileMap3D
     {
         Base,
         Overlay,
+        // 旧场景序列化兼容值。Effect 的渲染行为始终等同 Overlay，编辑器不再提供此选项。
         Effect
     }
 
@@ -26,23 +27,43 @@ namespace YokiFrame.Unity.TileMap3D
         private const string OverlayMaterialResourcePath = "TileMap3D/TileMap3DOverlay";
         private const string BaseShaderName = "TileMap3D/TilemapSurfaceCutout";
         private const string OverlayShaderName = "TileMap3D/TilemapSurfaceTransparent";
+        private static readonly int ReceiveShadowsId = Shader.PropertyToID(
+            "_TileMap3DReceiveShadows");
 
         [SerializeField] private TileMap3DLayerType layerType = TileMap3DLayerType.Overlay;
         [SerializeField] private Material materialOverride;
         [SerializeField, Min(0f)] private float additionalNormalOffset;
+        [SerializeField] private bool receiveShadows = true;
 
         [NonSerialized] private Material fallbackMaterial;
+        [NonSerialized] private MaterialPropertyBlock rendererProperties;
 
-        public TileMap3DLayerType LayerType => layerType;
+        public TileMap3DLayerType LayerType => NormalizeLayerType(layerType);
         public Material MaterialOverride => materialOverride;
         public float AdditionalNormalOffset => additionalNormalOffset;
+        public bool ReceiveShadows => receiveShadows;
 
         /// <summary>
         /// 设置新图层的职责，并请求所属 Surface 刷新渲染状态。
         /// </summary>
         public void Configure(TileMap3DLayerType value)
         {
-            layerType = value;
+            layerType = NormalizeLayerType(value);
+            RefreshOwnerSurface();
+        }
+
+        /// <summary>
+        /// 设置本图层是否接收实时阴影，并在下一次刷新时同步原生 Renderer 与自定义 Shader。
+        /// </summary>
+        public void SetReceiveShadows(bool value)
+        {
+            if (receiveShadows == value)
+            {
+                return;
+            }
+
+            receiveShadows = value;
+            ApplyShadowSettings();
             RefreshOwnerSurface();
         }
 
@@ -66,6 +87,8 @@ namespace YokiFrame.Unity.TileMap3D
                 tilemapRenderer.sharedMaterial = desiredMaterial;
             }
 
+            ApplyShadowSettings(tilemapRenderer);
+
             var localPosition = transform.localPosition;
             var normalOffset = Mathf.Max(0f, layerIndex * layerSpacing + additionalNormalOffset);
             localPosition.z = -normalOffset;
@@ -80,6 +103,7 @@ namespace YokiFrame.Unity.TileMap3D
         /// </summary>
         private void OnEnable()
         {
+            ApplyShadowSettings();
             RefreshOwnerSurface();
         }
 
@@ -88,8 +112,54 @@ namespace YokiFrame.Unity.TileMap3D
         /// </summary>
         private void OnValidate()
         {
+            layerType = NormalizeLayerType(layerType);
             additionalNormalOffset = Mathf.Max(0f, additionalNormalOffset);
+            ApplyShadowSettings();
             RefreshOwnerSurface();
+        }
+
+        /// <summary>
+        /// 将图层配置同步给原生 Renderer 与自定义 Shader，旧场景加载时也不依赖 Surface 重建时机。
+        /// </summary>
+        private void ApplyShadowSettings()
+        {
+            var tilemapRenderer = GetComponent<TilemapRenderer>();
+            if (tilemapRenderer != null)
+            {
+                ApplyShadowSettings(tilemapRenderer);
+            }
+        }
+
+        /// <summary>
+        /// 写入接收阴影开关和材质属性块，保证 NativeTilemap 的自定义光照与 Renderer 行为一致。
+        /// </summary>
+        private void ApplyShadowSettings(TilemapRenderer tilemapRenderer)
+        {
+            if (tilemapRenderer.receiveShadows != receiveShadows)
+            {
+                tilemapRenderer.receiveShadows = receiveShadows;
+            }
+
+            if (rendererProperties == null)
+            {
+                rendererProperties = new MaterialPropertyBlock();
+            }
+
+            tilemapRenderer.GetPropertyBlock(rendererProperties);
+            rendererProperties.SetFloat(
+                ReceiveShadowsId,
+                tilemapRenderer.receiveShadows ? 1f : 0f);
+            tilemapRenderer.SetPropertyBlock(rendererProperties);
+        }
+
+        /// <summary>
+        /// 将历史 Effect 类型归并到透明叠加渲染，避免它继续被误解为额外的 Tilemap 层级。
+        /// </summary>
+        private static TileMap3DLayerType NormalizeLayerType(TileMap3DLayerType value)
+        {
+            return value == TileMap3DLayerType.Effect
+                ? TileMap3DLayerType.Overlay
+                : value;
         }
 
         /// <summary>
@@ -119,7 +189,7 @@ namespace YokiFrame.Unity.TileMap3D
         /// </summary>
         private Material GetDefaultMaterial()
         {
-            var isBaseLayer = layerType == TileMap3DLayerType.Base;
+            var isBaseLayer = LayerType == TileMap3DLayerType.Base;
             var resourcePath = isBaseLayer
                 ? BaseMaterialResourcePath
                 : OverlayMaterialResourcePath;

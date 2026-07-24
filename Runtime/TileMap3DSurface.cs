@@ -58,7 +58,7 @@ namespace YokiFrame.Unity.TileMap3D
     public sealed class TileMap3DSurface : MonoBehaviour
     {
         private const string BakedSurfaceShaderName = "TileMap3D/BakedSurface";
-        private const int CurrentLayoutVersion = 3;
+        private const int CurrentLayoutVersion = 5;
         private const float MinimumCellSize = 0.01f;
         private const float MinimumThickness = 0.01f;
         private const float MinimumSurfaceSize = 0.01f;
@@ -70,6 +70,11 @@ namespace YokiFrame.Unity.TileMap3D
         private const int MinimumBakeTextureSize = 32;
         private const int MaximumBakeTextureSize = 16384;
         private const string DefaultOutputFolder = "Assets/TileMap3DGenerated";
+#if UNITY_EDITOR
+        private const float OutOfBoundsGizmoFillRatio = 0.86f;
+        private const float OutOfBoundsGizmoDepthRatio = 0.04f;
+        private const float MinimumOutOfBoundsGizmoDepth = 0.005f;
+#endif
 
         private static readonly int BaseMapId = Shader.PropertyToID("_BaseMap");
         private static readonly int BaseColorId = Shader.PropertyToID("_BaseColor");
@@ -82,6 +87,7 @@ namespace YokiFrame.Unity.TileMap3D
         [SerializeField, HideInInspector] private bool automaticBounds;
         [SerializeField] private BoundsInt bakeBounds = new BoundsInt(0, 0, 0, 8, 8, 1);
         [SerializeField, Min(MinimumCellSize)] private float cellSize = 1f;
+        [SerializeField, HideInInspector] private bool keepWorldGridAligned;
         [SerializeField, HideInInspector] private TileMap3DSizeMode sizeMode = TileMap3DSizeMode.TilemapRegion;
         [SerializeField, HideInInspector] private Vector2 customSize = new Vector2(8f, 8f);
         [SerializeField, HideInInspector] private int layoutVersion = CurrentLayoutVersion;
@@ -91,6 +97,7 @@ namespace YokiFrame.Unity.TileMap3D
         [SerializeField] private Color surfaceColor = Color.white;
         [SerializeField] private Material sideMaterial;
         [SerializeField] private bool showSourcePreview = true;
+        [SerializeField] private bool showOutOfBoundsTilePreview;
 
         [SerializeField, Range(MinimumPixelsPerCell, MaximumPixelsPerCell)]
         private int pixelsPerCell = 128;
@@ -118,12 +125,18 @@ namespace YokiFrame.Unity.TileMap3D
         [NonSerialized] private bool synchronizeSourceTileSizeOnRebuild;
 #if UNITY_EDITOR
         [NonSerialized] private bool delayedEditorRebuildScheduled;
+        [NonSerialized] private bool worldGridTransformInitialized;
+        [NonSerialized] private Vector3 lastWorldGridPosition;
+        [NonSerialized] private Quaternion lastWorldGridRotation;
+        [NonSerialized] private Vector3 lastWorldGridScale;
 #endif
         [NonSerialized] private bool hasMixedSourceTileSizes;
         [NonSerialized] private string sourceTileSizeWarning;
         [NonSerialized] private TileMap3DSurfaceMaterialBackend surfaceMaterialBackend;
         [NonSerialized] private bool surfaceMaterialFallbackActive;
         [NonSerialized] private string surfaceMaterialWarning;
+        [NonSerialized] private bool outOfBoundsTileCacheDirty = true;
+        [NonSerialized] private List<Vector3Int> outOfBoundsTilePositions;
         [SerializeField, HideInInspector] private bool ownsGeneratedGeometry;
 
         public Grid SourceGrid => sourceGrid;
@@ -137,6 +150,7 @@ namespace YokiFrame.Unity.TileMap3D
         public int Rows => GetBakeBounds().size.y;
         public float CellSize => cellSize;
         public Vector2 GroundSize => new Vector2(Columns * cellSize, Rows * cellSize);
+        public bool KeepWorldGridAligned => keepWorldGridAligned;
         public Vector2 SourceTileSize => GetSourceGridCellSize();
         public string SourceTileSizeWarning => sourceTileSizeWarning;
         public string SurfaceMaterialWarning => surfaceMaterialWarning;
@@ -159,6 +173,7 @@ namespace YokiFrame.Unity.TileMap3D
         public Material BakedMaterial => bakedMaterial;
         public BoundsInt LastBakedBounds => lastBakedBounds;
         public bool ShowSourcePreview => showSourcePreview;
+        public bool ShowOutOfBoundsTilePreview => showOutOfBoundsTilePreview;
 
         /// <summary>
         /// 配置新建 Surface 的承载方式和默认渲染模式，不迁移已有 Tile 数据。
@@ -170,6 +185,8 @@ namespace YokiFrame.Unity.TileMap3D
             surfaceMode = newSurfaceMode;
             renderMode = newRenderMode;
             showSourcePreview = newRenderMode == TileMap3DRenderMode.NativeTilemap;
+            showOutOfBoundsTilePreview = true;
+            keepWorldGridAligned = newSurfaceMode == TileMap3DSurfaceMode.GeneratedGround;
             layoutVersion = CurrentLayoutVersion;
             EnsureSerializedValues();
             ApplySourcePreviewVisibility();
@@ -270,6 +287,82 @@ namespace YokiFrame.Unity.TileMap3D
                 worldYLength > Mathf.Epsilon ? 1f / worldYLength : 1f,
                 worldZLength > Mathf.Epsilon ? 1f / worldZLength : 1f);
             Rebuild();
+        }
+
+        /// <summary>
+        /// 启用 Generated Ground 的世界格网吸附，并立即修正有效区域左下角的格网相位。
+        /// </summary>
+        public bool EnableWorldGridAlignment()
+        {
+            if (surfaceMode != TileMap3DSurfaceMode.GeneratedGround)
+            {
+                return false;
+            }
+
+            keepWorldGridAligned = true;
+            return AlignToWorldGrid();
+        }
+
+        /// <summary>
+        /// 关闭 Generated Ground 的世界格网吸附，保留当前 Transform 和全部 Tile 坐标。
+        /// </summary>
+        public void DisableWorldGridAlignment()
+        {
+            keepWorldGridAligned = false;
+#if UNITY_EDITOR
+            worldGridTransformInitialized = false;
+#endif
+        }
+
+        /// <summary>
+        /// 仅沿绘制平面的两个轴移动 Surface，使有效区域左下角落在完整世界 Cell 格网上。
+        /// </summary>
+        public bool AlignToWorldGrid()
+        {
+            if (sourceGrid == null)
+            {
+                return false;
+            }
+
+            var gridOrigin = sourceGrid.CellToWorld(GetBakeBounds().min);
+            var gridRight = sourceGrid.CellToWorld(GetBakeBounds().min + Vector3Int.right) - gridOrigin;
+            var gridUp = sourceGrid.CellToWorld(GetBakeBounds().min + Vector3Int.up) - gridOrigin;
+            var rightCellSize = gridRight.magnitude;
+            var upCellSize = gridUp.magnitude;
+            if (rightCellSize <= Mathf.Epsilon || upCellSize <= Mathf.Epsilon)
+            {
+                return false;
+            }
+
+            var rightDirection = gridRight / rightCellSize;
+            var upDirection = gridUp / upCellSize;
+            var axisDot = Vector3.Dot(rightDirection, upDirection);
+            var determinant = 1f - axisDot * axisDot;
+            if (determinant <= Mathf.Epsilon)
+            {
+                return false;
+            }
+
+            var rightCoordinate = Vector3.Dot(gridOrigin, rightDirection);
+            var upCoordinate = Vector3.Dot(gridOrigin, upDirection);
+            var rightOffset = Mathf.Round(rightCoordinate / rightCellSize) * rightCellSize
+                - rightCoordinate;
+            var upOffset = Mathf.Round(upCoordinate / upCellSize) * upCellSize - upCoordinate;
+            var correction = rightDirection * ((rightOffset - axisDot * upOffset) / determinant)
+                + upDirection * ((upOffset - axisDot * rightOffset) / determinant);
+            if (correction.sqrMagnitude <= GridCenterTolerance * GridCenterTolerance)
+            {
+#if UNITY_EDITOR
+                CaptureWorldGridTransform();
+#endif
+                return false;
+            }
+
+            transform.position += correction;
+#if UNITY_EDITOR
+            CaptureWorldGridTransform();
+#endif
+            return true;
         }
 
         /// <summary>
@@ -431,6 +524,76 @@ namespace YokiFrame.Unity.TileMap3D
         }
 
         /// <summary>
+        /// 切换 Scene View 中的越界 Tile 警示，不改变 TilemapRenderer 或运行时渲染结果。
+        /// </summary>
+        public void SetOutOfBoundsTilePreviewVisible(bool visible)
+        {
+            if (showOutOfBoundsTilePreview == visible)
+            {
+                return;
+            }
+
+            showOutOfBoundsTilePreview = visible;
+            if (visible)
+            {
+                InvalidateOutOfBoundsTileCache();
+            }
+        }
+
+        /// <summary>
+        /// 判断 Cell 是否位于当前列数、行数和起点共同定义的固定 Surface 区域内。
+        /// </summary>
+        public bool IsCellInsideSurfaceBounds(Vector3Int cell)
+        {
+            return GetBakeBounds().Contains(cell);
+        }
+
+        /// <summary>
+        /// 统计全部源图层中的越界 Tile；同一 Cell 在多个图层有 Tile 时分别计数。
+        /// </summary>
+        public int CountOutOfBoundsTiles(bool forceRefresh = false)
+        {
+            EnsureOutOfBoundsTileCache(forceRefresh);
+            return outOfBoundsTilePositions.Count;
+        }
+
+        /// <summary>
+        /// 删除全部源图层中的越界 Tile，并返回实际删除数量；编辑器 Undo 由调用方登记。
+        /// </summary>
+        public int ClearOutOfBoundsTiles()
+        {
+            var clearedCount = 0;
+            var tilemaps = GetSourceTilemaps(true);
+            for (var tilemapIndex = 0; tilemapIndex < tilemaps.Length; tilemapIndex++)
+            {
+                var tilemap = tilemaps[tilemapIndex];
+                if (tilemap == null)
+                {
+                    continue;
+                }
+
+                var positions = new List<Vector3Int>();
+                AppendOutOfBoundsTilePositions(tilemap, positions);
+                if (positions.Count == 0)
+                {
+                    continue;
+                }
+
+                tilemap.SetTiles(positions.ToArray(), new TileBase[positions.Count]);
+                tilemap.CompressBounds();
+                clearedCount += positions.Count;
+            }
+
+            if (clearedCount > 0)
+            {
+                InvalidateOutOfBoundsTileCache();
+                RequestRebuild();
+            }
+
+            return clearedCount;
+        }
+
+        /// <summary>
         /// 返回当前参与编辑的全部原生 Tilemap，调用方可自行检查 Renderer 启用状态。
         /// </summary>
         public Tilemap[] GetSourceTilemaps(bool includeInactive = true)
@@ -438,6 +601,82 @@ namespace YokiFrame.Unity.TileMap3D
             return sourceGrid != null
                 ? sourceGrid.GetComponentsInChildren<Tilemap>(includeInactive)
                 : Array.Empty<Tilemap>();
+        }
+
+        /// <summary>
+        /// 标记越界 Tile 统计和 Scene View 警示缓存需要在下次读取时重建。
+        /// </summary>
+        private void InvalidateOutOfBoundsTileCache()
+        {
+            outOfBoundsTileCacheDirty = true;
+        }
+
+        /// <summary>
+        /// 按当前固定 Surface 区域重建全部图层的越界 Tile 缓存，避免 Scene View 每帧重复枚举大地图。
+        /// </summary>
+        private void EnsureOutOfBoundsTileCache(bool forceRefresh = false)
+        {
+            if (!forceRefresh && !outOfBoundsTileCacheDirty && outOfBoundsTilePositions != null)
+            {
+                return;
+            }
+
+            if (outOfBoundsTilePositions == null)
+            {
+                outOfBoundsTilePositions = new List<Vector3Int>();
+            }
+            else
+            {
+                outOfBoundsTilePositions.Clear();
+            }
+
+            var tilemaps = GetSourceTilemaps(true);
+            for (var tilemapIndex = 0; tilemapIndex < tilemaps.Length; tilemapIndex++)
+            {
+                AppendOutOfBoundsTilePositions(tilemaps[tilemapIndex], outOfBoundsTilePositions);
+            }
+
+            outOfBoundsTileCacheDirty = false;
+        }
+
+        /// <summary>
+        /// 将一个原生 Tilemap 中位于固定 Surface 区域外的非空 Cell 追加到目标集合。
+        /// </summary>
+        private void AppendOutOfBoundsTilePositions(Tilemap tilemap, List<Vector3Int> positions)
+        {
+            if (tilemap == null || positions == null)
+            {
+                return;
+            }
+
+            var tileBounds = tilemap.cellBounds;
+            if (tileBounds.size.x <= 0 || tileBounds.size.y <= 0 || tileBounds.size.z <= 0)
+            {
+                return;
+            }
+
+            var end = tileBounds.max - Vector3Int.one;
+            var tileCount = tilemap.GetTilesRangeCount(tileBounds.min, end);
+            if (tileCount <= 0)
+            {
+                return;
+            }
+
+            var tilePositions = new Vector3Int[tileCount];
+            var tiles = new TileBase[tileCount];
+            var actualCount = tilemap.GetTilesRangeNonAlloc(
+                tileBounds.min,
+                end,
+                tilePositions,
+                tiles);
+            var surfaceBounds = GetBakeBounds();
+            for (var tileIndex = 0; tileIndex < actualCount; tileIndex++)
+            {
+                if (!surfaceBounds.Contains(tilePositions[tileIndex]))
+                {
+                    positions.Add(tilePositions[tileIndex]);
+                }
+            }
         }
 
         /// <summary>
@@ -594,6 +833,7 @@ namespace YokiFrame.Unity.TileMap3D
                 return;
             }
 
+            InvalidateOutOfBoundsTileCache();
             isRebuilding = true;
             try
             {
@@ -620,14 +860,11 @@ namespace YokiFrame.Unity.TileMap3D
         {
             rebuildRequested = true;
             synchronizeSourceTileSizeOnRebuild |= synchronizeSourceTileSize;
-            if (Application.isPlaying)
-            {
-                ProcessRequestedRebuild();
-                return;
-            }
-
 #if UNITY_EDITOR
-            ScheduleDelayedEditorRebuild();
+            if (!Application.isPlaying)
+            {
+                ScheduleDelayedEditorRebuild();
+            }
 #endif
         }
 
@@ -743,7 +980,10 @@ namespace YokiFrame.Unity.TileMap3D
 #if UNITY_EDITOR
             EditorSceneManager.sceneSaved -= HandleSceneSaved;
             EditorSceneManager.sceneSaved += HandleSceneSaved;
+            Undo.undoRedoPerformed -= HandleUndoRedo;
+            Undo.undoRedoPerformed += HandleUndoRedo;
 #endif
+            InvalidateOutOfBoundsTileCache();
             EnsureSerializedValues();
             RequestRebuild(true);
         }
@@ -756,7 +996,9 @@ namespace YokiFrame.Unity.TileMap3D
             Tilemap.tilemapTileChanged -= HandleTilemapChanged;
 #if UNITY_EDITOR
             EditorSceneManager.sceneSaved -= HandleSceneSaved;
+            Undo.undoRedoPerformed -= HandleUndoRedo;
             CancelDelayedEditorRebuild();
+            worldGridTransformInitialized = false;
 #endif
             rebuildRequested = false;
             synchronizeSourceTileSizeOnRebuild = false;
@@ -771,6 +1013,9 @@ namespace YokiFrame.Unity.TileMap3D
         /// </summary>
         private void Update()
         {
+#if UNITY_EDITOR
+            MaintainWorldGridAlignmentInEditor();
+#endif
             ProcessRequestedRebuild();
             if (surfaceMaterialBackend != null && !surfaceMaterialFallbackActive)
             {
@@ -783,6 +1028,7 @@ namespace YokiFrame.Unity.TileMap3D
         /// </summary>
         private void OnValidate()
         {
+            InvalidateOutOfBoundsTileCache();
             EnsureSerializedValues();
             RequestRebuild(true);
         }
@@ -792,6 +1038,7 @@ namespace YokiFrame.Unity.TileMap3D
         /// </summary>
         private void OnTransformChildrenChanged()
         {
+            InvalidateOutOfBoundsTileCache();
             RequestRebuild(true);
         }
 
@@ -803,6 +1050,7 @@ namespace YokiFrame.Unity.TileMap3D
             Tilemap.tilemapTileChanged -= HandleTilemapChanged;
 #if UNITY_EDITOR
             EditorSceneManager.sceneSaved -= HandleSceneSaved;
+            Undo.undoRedoPerformed -= HandleUndoRedo;
             CancelDelayedEditorRebuild();
 #endif
             ReleaseSurfaceMaterialBackend();
@@ -817,6 +1065,44 @@ namespace YokiFrame.Unity.TileMap3D
 
 #if UNITY_EDITOR
         /// <summary>
+        /// 编辑模式下检测 Generated Ground 的世界变换，移动或旋转后恢复完整 Cell 格网相位。
+        /// </summary>
+        private void MaintainWorldGridAlignmentInEditor()
+        {
+            if (Application.isPlaying
+                || !keepWorldGridAligned
+                || surfaceMode != TileMap3DSurfaceMode.GeneratedGround
+                || sourceGrid == null)
+            {
+                worldGridTransformInitialized = false;
+                return;
+            }
+
+            var worldScale = transform.lossyScale;
+            if (worldGridTransformInitialized
+                && transform.position == lastWorldGridPosition
+                && transform.rotation == lastWorldGridRotation
+                && worldScale == lastWorldGridScale)
+            {
+                return;
+            }
+
+            AlignToWorldGrid();
+            CaptureWorldGridTransform();
+        }
+
+        /// <summary>
+        /// 记录对齐后的世界变换，避免 ExecuteAlways 在静止状态重复计算和写入。
+        /// </summary>
+        private void CaptureWorldGridTransform()
+        {
+            worldGridTransformInitialized = true;
+            lastWorldGridPosition = transform.position;
+            lastWorldGridRotation = transform.rotation;
+            lastWorldGridScale = transform.lossyScale;
+        }
+
+        /// <summary>
         /// 自身场景保存完成后延迟恢复临时材质参数，避开 Unity 的序列化一致性检查阶段。
         /// </summary>
         private void HandleSceneSaved(Scene savedScene)
@@ -830,6 +1116,71 @@ namespace YokiFrame.Unity.TileMap3D
             }
 
             RequestRebuild(false);
+        }
+
+        /// <summary>
+        /// Undo 或 Redo 恢复 Tilemap 数据后使越界缓存失效；已有 Tilemap 变更事件继续负责渲染后端刷新。
+        /// </summary>
+        private void HandleUndoRedo()
+        {
+            if (this == null)
+            {
+                return;
+            }
+
+            InvalidateOutOfBoundsTileCache();
+            if (showOutOfBoundsTilePreview)
+            {
+                SceneView.RepaintAll();
+            }
+        }
+
+        /// <summary>
+        /// 开启警示时在 Scene View 绘制固定区域边框和所有含 Tile 的越界 Cell。
+        /// </summary>
+        private void OnDrawGizmos()
+        {
+            if (!showOutOfBoundsTilePreview || sourceGrid == null || !isActiveAndEnabled)
+            {
+                return;
+            }
+
+            EnsureOutOfBoundsTileCache();
+            var gridCellSize = sourceGrid.cellSize;
+            var cellWidth = Mathf.Max(MinimumCellSize, Mathf.Abs(gridCellSize.x));
+            var cellHeight = Mathf.Max(MinimumCellSize, Mathf.Abs(gridCellSize.y));
+            var cellDepth = Mathf.Max(
+                MinimumOutOfBoundsGizmoDepth,
+                Mathf.Min(cellWidth, cellHeight) * OutOfBoundsGizmoDepthRatio);
+            var previousMatrix = Gizmos.matrix;
+            var previousColor = Gizmos.color;
+            Gizmos.matrix = sourceGrid.transform.localToWorldMatrix;
+
+            var validRect = GetGridLocalBakeRect(GetBakeBounds());
+            var validCenter = new Vector3(validRect.center.x, validRect.center.y, -cellDepth);
+            Gizmos.color = new Color(1f, 0.68f, 0.12f, 0.95f);
+            Gizmos.DrawWireCube(
+                validCenter,
+                new Vector3(validRect.width, validRect.height, cellDepth));
+
+            var warningSize = new Vector3(
+                cellWidth * OutOfBoundsGizmoFillRatio,
+                cellHeight * OutOfBoundsGizmoFillRatio,
+                cellDepth);
+            for (var i = 0; i < outOfBoundsTilePositions.Count; i++)
+            {
+                var cell = outOfBoundsTilePositions[i];
+                var cellCenter = sourceGrid.CellToLocalInterpolated(
+                    new Vector3(cell.x + 0.5f, cell.y + 0.5f, cell.z));
+                cellCenter.z -= cellDepth;
+                Gizmos.color = new Color(1f, 0.22f, 0.08f, 0.28f);
+                Gizmos.DrawCube(cellCenter, warningSize);
+                Gizmos.color = new Color(1f, 0.35f, 0.08f, 0.95f);
+                Gizmos.DrawWireCube(cellCenter, warningSize);
+            }
+
+            Gizmos.matrix = previousMatrix;
+            Gizmos.color = previousColor;
         }
 #endif
 
@@ -867,6 +1218,7 @@ namespace YokiFrame.Unity.TileMap3D
                 return;
             }
 
+            InvalidateOutOfBoundsTileCache();
             SynchronizeSourceTileSizeFromChangedTiles(changedTiles);
             RequestRebuild();
         }
@@ -1411,6 +1763,12 @@ namespace YokiFrame.Unity.TileMap3D
                 && renderMode == TileMap3DRenderMode.BakedTexture)
             {
                 renderMode = TileMap3DRenderMode.NativeTilemap;
+            }
+
+            if (layoutVersion < 5)
+            {
+                // Generated Ground 与 Overlay 默认共享同一世界格网相位，旧地面升级后也立即恢复该契约。
+                keepWorldGridAligned = surfaceMode == TileMap3DSurfaceMode.GeneratedGround;
             }
 
             layoutVersion = CurrentLayoutVersion;

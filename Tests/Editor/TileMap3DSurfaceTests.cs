@@ -67,6 +67,7 @@ namespace TileMap3D.Tests
             Assert.That(root.GetComponent<BoxCollider>(), Is.Null);
             Assert.That(surface.SurfaceMode, Is.EqualTo(TileMap3DSurfaceMode.Overlay));
             Assert.That(surface.RenderMode, Is.EqualTo(TileMap3DRenderMode.SurfaceMaterial));
+            Assert.That(surface.ShowOutOfBoundsTilePreview, Is.True);
         }
 
         /// <summary>
@@ -121,6 +122,9 @@ namespace TileMap3D.Tests
 
             var baseRenderer = baseLayer.GetComponent<TilemapRenderer>();
             var overlayRenderer = overlayLayer.GetComponent<TilemapRenderer>();
+            baseLayer.SetReceiveShadows(false);
+            overlayLayer.SetReceiveShadows(true);
+            surface.Rebuild();
             Assert.That(baseRenderer.sharedMaterial, Is.Not.Null);
             Assert.That(overlayRenderer.sharedMaterial, Is.Not.Null);
             Assert.That(
@@ -136,6 +140,51 @@ namespace TileMap3D.Tests
             Assert.That(gridObject.transform.localPosition.y, Is.EqualTo(0.02f).Within(0.0001f));
             Assert.That(baseRenderer.forceRenderingOff, Is.False);
             Assert.That(overlayRenderer.forceRenderingOff, Is.False);
+            Assert.That(baseRenderer.receiveShadows, Is.False);
+            Assert.That(overlayRenderer.receiveShadows, Is.True);
+            var properties = new MaterialPropertyBlock();
+            baseRenderer.GetPropertyBlock(properties);
+            Assert.That(properties.GetFloat("_TileMap3DReceiveShadows"), Is.Zero);
+            overlayRenderer.GetPropertyBlock(properties);
+            Assert.That(properties.GetFloat("_TileMap3DReceiveShadows"), Is.EqualTo(1f));
+        }
+
+        /// <summary>
+        /// 新建 NativeTilemap 图层应默认接收实时阴影，避免沿用 Unity 2D Tilemap 的关闭状态。
+        /// </summary>
+        [Test]
+        public void NativeLayer_ReceivesShadowsByDefault()
+        {
+            var layerObject = new GameObject("Shadow Receiver Layer");
+            layerObject.transform.SetParent(root.transform, false);
+            layerObject.AddComponent<Tilemap>();
+            var tilemapRenderer = layerObject.AddComponent<TilemapRenderer>();
+            var layer = layerObject.AddComponent<TileMap3DLayer>();
+
+            layer.ApplyRendererSettings(0, 0f);
+
+            Assert.That(layer.ReceiveShadows, Is.True);
+            Assert.That(tilemapRenderer.receiveShadows, Is.True);
+            var properties = new MaterialPropertyBlock();
+            tilemapRenderer.GetPropertyBlock(properties);
+            Assert.That(properties.GetFloat("_TileMap3DReceiveShadows"), Is.EqualTo(1f));
+        }
+
+        /// <summary>
+        /// 旧场景中的 Effect 类型应自动归并到 Overlay，避免历史序列化值继续表现为额外的渲染类型。
+        /// </summary>
+        [Test]
+        public void LegacyEffectLayerType_NormalizesToOverlay()
+        {
+            var layerObject = new GameObject("Legacy Effect Layer");
+            layerObject.transform.SetParent(root.transform, false);
+            layerObject.AddComponent<Tilemap>();
+            layerObject.AddComponent<TilemapRenderer>();
+            var layer = layerObject.AddComponent<TileMap3DLayer>();
+
+            layer.Configure(TileMap3DLayerType.Effect);
+
+            Assert.That(layer.LayerType, Is.EqualTo(TileMap3DLayerType.Overlay));
         }
 
         /// <summary>
@@ -164,6 +213,95 @@ namespace TileMap3D.Tests
             Assert.That(
                 surface.transform.TransformVector(Vector3.forward).magnitude,
                 Is.EqualTo(1f).Within(0.0001f));
+        }
+
+        /// <summary>
+        /// Generated Ground 应默认启用世界格网吸附，并且只修正绘制平面的格网相位。
+        /// </summary>
+        [Test]
+        public void AlignToWorldGrid_SnapsValidRegionOriginWithoutChangingNormalPosition()
+        {
+            var surface = root.AddComponent<TileMap3DSurface>();
+            surface.ConfigureForCreation(
+                TileMap3DSurfaceMode.GeneratedGround,
+                TileMap3DRenderMode.NativeTilemap);
+            surface.SetGroundLayout(8, 8, 1f);
+            CreateSourceTilemap(surface, out var grid);
+            root.SetActive(true);
+            root.transform.position = new Vector3(1.08f, 2f, 0f);
+            var updateMethod = typeof(TileMap3DSurface).GetMethod(
+                "Update",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+
+            Assert.That(surface.KeepWorldGridAligned, Is.True);
+            Assert.That(updateMethod, Is.Not.Null);
+            updateMethod.Invoke(surface, null);
+
+            var gridOrigin = grid.CellToWorld(surface.GetBakeBounds().min);
+            Assert.That(gridOrigin.x, Is.EqualTo(Mathf.Round(gridOrigin.x)).Within(0.0001f));
+            Assert.That(gridOrigin.z, Is.EqualTo(Mathf.Round(gridOrigin.z)).Within(0.0001f));
+            Assert.That(root.transform.position.x, Is.EqualTo(1f).Within(0.0001f));
+            Assert.That(root.transform.position.y, Is.EqualTo(2f).Within(0.0001f));
+            Assert.That(surface.AlignToWorldGrid(), Is.False);
+        }
+
+        /// <summary>
+        /// 世界格网吸附应使用缩放后的真实 Cell 尺寸，不能按未缩放的 Surface CellSize 吸附。
+        /// </summary>
+        [Test]
+        public void AlignToWorldGrid_UsesScaledWorldCellDimensions()
+        {
+            root.transform.localScale = new Vector3(2f, 1f, 3f);
+            var surface = root.AddComponent<TileMap3DSurface>();
+            surface.ConfigureForCreation(
+                TileMap3DSurfaceMode.GeneratedGround,
+                TileMap3DRenderMode.NativeTilemap);
+            surface.SetGroundLayout(8, 8, 1f);
+            CreateSourceTilemap(surface, out var grid);
+            root.transform.position = new Vector3(0.37f, 2f, 0.82f);
+            root.SetActive(true);
+
+            Assert.That(surface.AlignToWorldGrid(), Is.True);
+
+            var gridOrigin = grid.CellToWorld(surface.GetBakeBounds().min);
+            var gridRight = grid.CellToWorld(surface.GetBakeBounds().min + Vector3Int.right) - gridOrigin;
+            var gridUp = grid.CellToWorld(surface.GetBakeBounds().min + Vector3Int.up) - gridOrigin;
+            var rightCoordinate = Vector3.Dot(gridOrigin, gridRight.normalized);
+            var upCoordinate = Vector3.Dot(gridOrigin, gridUp.normalized);
+            Assert.That(
+                rightCoordinate / gridRight.magnitude,
+                Is.EqualTo(Mathf.Round(rightCoordinate / gridRight.magnitude)).Within(0.0001f));
+            Assert.That(
+                upCoordinate / gridUp.magnitude,
+                Is.EqualTo(Mathf.Round(upCoordinate / gridUp.magnitude)).Within(0.0001f));
+            Assert.That(root.transform.position.y, Is.EqualTo(2f).Within(0.0001f));
+        }
+
+        /// <summary>
+        /// 旧版 Generated Ground 升级后也应自动启用世界格网吸附，不能继续保留小数相位。
+        /// </summary>
+        [Test]
+        public void LegacyGeneratedGround_UpgradeEnablesWorldGridAlignment()
+        {
+            var surface = root.AddComponent<TileMap3DSurface>();
+            surface.ConfigureForCreation(
+                TileMap3DSurfaceMode.GeneratedGround,
+                TileMap3DRenderMode.NativeTilemap);
+            surface.SetGroundLayout(8, 8, 1f);
+            CreateSourceTilemap(surface, out var grid);
+            SetPrivateField(surface, "layoutVersion", 4);
+            SetPrivateField(surface, "keepWorldGridAligned", false);
+            root.transform.position = new Vector3(1.08f, 2f, 0f);
+            root.SetActive(true);
+
+            InvokePrivate(surface, "Update");
+
+            var gridOrigin = grid.CellToWorld(surface.GetBakeBounds().min);
+            Assert.That(surface.KeepWorldGridAligned, Is.True);
+            Assert.That(gridOrigin.x, Is.EqualTo(Mathf.Round(gridOrigin.x)).Within(0.0001f));
+            Assert.That(gridOrigin.z, Is.EqualTo(Mathf.Round(gridOrigin.z)).Within(0.0001f));
+            Assert.That(root.transform.position.x, Is.EqualTo(1f).Within(0.0001f));
+            Assert.That(root.transform.position.y, Is.EqualTo(2f).Within(0.0001f));
         }
 
         /// <summary>
@@ -251,6 +389,7 @@ namespace TileMap3D.Tests
         {
             var target = CreateCubeTarget("Surface Material Target", new Vector3(4f, 0.5f, 3f));
             var targetRenderer = target.GetComponent<MeshRenderer>();
+            targetRenderer.receiveShadows = true;
             var originalMaterial = targetRenderer.sharedMaterial;
             var surface = CreateOverlaySurface(
                 target,
@@ -270,6 +409,13 @@ namespace TileMap3D.Tests
             Assert.That(target.GetComponent<MeshRenderer>(), Is.SameAs(targetRenderer));
             Assert.That(targetRenderer.sharedMaterial, Is.SameAs(originalMaterial));
             Assert.That(target.GetComponent<BoxCollider>(), Is.Not.Null);
+            var backendRenderer = target
+                .GetComponentInChildren<TileMap3DSurfaceMaterialRendererOwner>(true)
+                .GetComponent<MeshRenderer>();
+            Assert.That(backendRenderer.receiveShadows, Is.True);
+            Assert.That(
+                backendRenderer.sharedMaterial.GetFloat("_TileMap3DReceiveShadows"),
+                Is.EqualTo(1f));
         }
 
         /// <summary>
@@ -452,6 +598,58 @@ namespace TileMap3D.Tests
         }
 
         /// <summary>
+        /// SurfaceMaterial 应保留 Tight Sprite 的原生顶点边界，不能把裁切纹理重新铺满整个 Cell。
+        /// </summary>
+        [Test]
+        public void SurfaceMaterial_TightSpriteGeometry_RemainsInsideOriginalCellBounds()
+        {
+            var backendType = typeof(TileMap3DSurface).Assembly.GetType(
+                "YokiFrame.Unity.TileMap3D.TileMap3DSurfaceMaterialBackend");
+            Assert.That(backendType, Is.Not.Null);
+            var calculateMethod = backendType.GetMethod(
+                "CalculateNormalizedSpriteGeometry",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.That(calculateMethod, Is.Not.Null);
+            var vertices = new[]
+            {
+                new Vector2(-0.34f, -0.36f),
+                new Vector2(-0.34f, 0.5f),
+                new Vector2(0.5f, 0.5f),
+                new Vector2(0.5f, -0.36f)
+            };
+
+            var geometry = (Vector4)calculateMethod.Invoke(
+                null,
+                new object[] { vertices, Vector2.one, new Vector2(0.5f, 0.5f) });
+
+            Assert.That(geometry.x, Is.EqualTo(0.16f).Within(0.0001f));
+            Assert.That(geometry.y, Is.EqualTo(0.14f).Within(0.0001f));
+            Assert.That(geometry.z, Is.EqualTo(1f).Within(0.0001f));
+            Assert.That(geometry.w, Is.EqualTo(1f).Within(0.0001f));
+        }
+
+        /// <summary>
+        /// 固定区域过大时 SurfaceMaterial 应在分配 CPU/GPU 数据前安全回退，不能尝试创建巨型纹理。
+        /// </summary>
+        [Test]
+        public void SurfaceMaterial_ExcessiveDataBudget_FallsBackBeforeAllocation()
+        {
+            var target = CreateCubeTarget("Large Surface Target", Vector3.one);
+            var surface = CreateOverlaySurface(
+                target,
+                Quaternion.identity,
+                TileMap3DRenderMode.SurfaceMaterial);
+            CreateSourceTilemap(surface, out _);
+            surface.SetGroundLayout(4096, 4096, 1f);
+            root.SetActive(true);
+
+            surface.Rebuild();
+
+            Assert.That(surface.IsSurfaceMaterialActive, Is.False);
+            Assert.That(surface.SurfaceMaterialWarning, Does.Contain("256.0 MiB"));
+        }
+
+        /// <summary>
         /// 目标 Mesh 从不支持状态恢复后，SurfaceMaterial 应清除 Native 回退留下的物理偏移。
         /// </summary>
         [Test]
@@ -480,6 +678,87 @@ namespace TileMap3D.Tests
             Assert.That(surface.IsSurfaceMaterialActive, Is.True, surface.SurfaceMaterialWarning);
             Assert.That(grid.transform.localPosition.y, Is.EqualTo(0f).Within(0.0001f));
             Assert.That(tilemap.GetComponent<TilemapRenderer>().forceRenderingOff, Is.True);
+        }
+
+        /// <summary>
+        /// 固定 Surface 区域应只接受定义范围内的 XY Cell，并拒绝其它 Z 层。
+        /// </summary>
+        [Test]
+        public void SurfaceBounds_OnlyContainsConfiguredCellRegion()
+        {
+            var surface = root.AddComponent<TileMap3DSurface>();
+            surface.ConfigureForCreation(
+                TileMap3DSurfaceMode.Overlay,
+                TileMap3DRenderMode.NativeTilemap);
+            surface.SetGroundLayout(2, 3, 1f);
+
+            Assert.That(surface.IsCellInsideSurfaceBounds(new Vector3Int(0, 0, 0)), Is.True);
+            Assert.That(surface.IsCellInsideSurfaceBounds(new Vector3Int(1, 2, 0)), Is.True);
+            Assert.That(surface.IsCellInsideSurfaceBounds(new Vector3Int(2, 2, 0)), Is.False);
+            Assert.That(surface.IsCellInsideSurfaceBounds(new Vector3Int(-1, 0, 0)), Is.False);
+            Assert.That(surface.IsCellInsideSurfaceBounds(new Vector3Int(0, 3, 0)), Is.False);
+            Assert.That(surface.IsCellInsideSurfaceBounds(new Vector3Int(0, 0, 1)), Is.False);
+        }
+
+        /// <summary>
+        /// 清理越界 Tile 时应覆盖全部图层，同时保留固定 Surface 区域内的数据。
+        /// </summary>
+        [Test]
+        public void ClearOutOfBoundsTiles_RemovesOnlyCellsOutsideSurfaceAcrossAllLayers()
+        {
+            var surface = root.AddComponent<TileMap3DSurface>();
+            surface.ConfigureForCreation(
+                TileMap3DSurfaceMode.Overlay,
+                TileMap3DRenderMode.NativeTilemap);
+            var baseTilemap = CreateSourceTilemap(surface, out var grid);
+            var overlayTilemap = CreateLayer(
+                    grid.transform,
+                    "Overlay",
+                    TileMap3DLayerType.Overlay)
+                .GetComponent<Tilemap>();
+            surface.SetGroundLayout(2, 2, 1f);
+            var tile = CreateTestTile(Color.white);
+            var baseInsideCell = new Vector3Int(0, 0, 0);
+            var overlayInsideCell = new Vector3Int(1, 1, 0);
+            var baseOutsideCell = new Vector3Int(2, 0, 0);
+            var overlayOutsideCell = new Vector3Int(-1, 1, 0);
+            baseTilemap.SetTile(baseInsideCell, tile);
+            baseTilemap.SetTile(baseOutsideCell, tile);
+            overlayTilemap.SetTile(overlayInsideCell, tile);
+            overlayTilemap.SetTile(overlayOutsideCell, tile);
+            overlayTilemap.SetTile(baseOutsideCell, tile);
+
+            root.SetActive(true);
+            Assert.That(surface.CountOutOfBoundsTiles(), Is.EqualTo(3));
+            Assert.That(surface.ClearOutOfBoundsTiles(), Is.EqualTo(3));
+            Assert.That(baseTilemap.GetTile(baseInsideCell), Is.SameAs(tile));
+            Assert.That(overlayTilemap.GetTile(overlayInsideCell), Is.SameAs(tile));
+            Assert.That(baseTilemap.GetTile(baseOutsideCell), Is.Null);
+            Assert.That(overlayTilemap.GetTile(overlayOutsideCell), Is.Null);
+            Assert.That(surface.CountOutOfBoundsTiles(), Is.Zero);
+        }
+
+        /// <summary>
+        /// 禁用 Surface 期间不会订阅 Tilemap 事件，批量工具必须能强制重建越界缓存。
+        /// </summary>
+        [Test]
+        public void CountOutOfBoundsTiles_ForceRefreshReadsDisabledSurfaceChanges()
+        {
+            var surface = root.AddComponent<TileMap3DSurface>();
+            surface.ConfigureForCreation(
+                TileMap3DSurfaceMode.Overlay,
+                TileMap3DRenderMode.NativeTilemap);
+            var tilemap = CreateSourceTilemap(surface, out _);
+            surface.SetGroundLayout(1, 1, 1f);
+            var tile = CreateTestTile(Color.white);
+            root.SetActive(true);
+            Assert.That(surface.CountOutOfBoundsTiles(), Is.Zero);
+
+            root.SetActive(false);
+            tilemap.SetTile(new Vector3Int(1, 0, 0), tile);
+
+            Assert.That(surface.CountOutOfBoundsTiles(), Is.Zero);
+            Assert.That(surface.CountOutOfBoundsTiles(true), Is.EqualTo(1));
         }
 
         /// <summary>

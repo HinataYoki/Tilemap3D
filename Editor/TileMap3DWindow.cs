@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEditor;
 using UnityEditor.UIElements;
 using UnityEngine;
@@ -15,12 +16,19 @@ namespace YokiFrame.Unity.TileMap3D
     {
         private const string WindowTitle = "TileMap3D";
         private const float SectionSpacing = 8f;
+        private static readonly List<string> LayerRenderTypeChoices = new List<string>
+        {
+            "Base（写入深度）",
+            "Overlay（透明叠加）"
+        };
 
         [SerializeField] private TileMap3DSurface surface;
         [SerializeField] private Tilemap activeTilemap;
 
         private ObjectField surfaceField;
         private Label statusLabel;
+        private Label outOfBoundsStatusLabel;
+        private Button clearOutOfBoundsButton;
         private VisualElement content;
         private bool refreshQueued;
 
@@ -68,6 +76,14 @@ namespace YokiFrame.Unity.TileMap3D
         private void OnDisable()
         {
             EditorApplication.hierarchyChanged -= HandleHierarchyChanged;
+        }
+
+        /// <summary>
+        /// 定期更新越界 Tile 数量；Surface 内部仅在数据变化后重新枚举，避免每次界面重绘扫描大地图。
+        /// </summary>
+        private void OnInspectorUpdate()
+        {
+            RefreshOutOfBoundsTools();
         }
 
         /// <summary>
@@ -125,6 +141,8 @@ namespace YokiFrame.Unity.TileMap3D
             }
 
             root.Clear();
+            outOfBoundsStatusLabel = null;
+            clearOutOfBoundsButton = null;
             var headerActions = new VisualElement();
             headerActions.style.flexDirection = FlexDirection.Row;
             headerActions.Add(CreateToolbarPrimaryButton("新建地面", CreateSurface));
@@ -243,6 +261,33 @@ namespace YokiFrame.Unity.TileMap3D
             }
 
             section.body.Add(layerList);
+            var outOfBoundsTools = new VisualElement();
+            outOfBoundsTools.style.flexDirection = FlexDirection.Row;
+            outOfBoundsTools.style.alignItems = Align.Center;
+            outOfBoundsTools.style.flexWrap = Wrap.Wrap;
+            outOfBoundsTools.style.marginTop = 6f;
+            outOfBoundsTools.style.marginBottom = 4f;
+            var previewToggle = new Toggle("显示越界 Tile 警示")
+            {
+                value = surface.ShowOutOfBoundsTilePreview
+            };
+            previewToggle.tooltip = "仅在 Scene View 标出固定 Surface 区域外的 Tile，不影响最终渲染";
+            previewToggle.style.marginRight = 8f;
+            previewToggle.RegisterValueChangedCallback(evt => SetOutOfBoundsPreview(evt.newValue));
+            outOfBoundsTools.Add(previewToggle);
+            outOfBoundsStatusLabel = new Label();
+            outOfBoundsStatusLabel.style.flexGrow = 1f;
+            outOfBoundsStatusLabel.style.minWidth = 150f;
+            outOfBoundsStatusLabel.style.marginRight = 8f;
+            outOfBoundsTools.Add(outOfBoundsStatusLabel);
+            clearOutOfBoundsButton = CreateSecondaryButton("清理越界 Tile", ClearOutOfBoundsTiles);
+            outOfBoundsTools.Add(clearOutOfBoundsButton);
+            var clearAllOutOfBoundsButton = CreateSecondaryButton(
+                "清理场景中所有越界 Tile",
+                ClearAllOutOfBoundsTilesInLoadedScenes);
+            clearAllOutOfBoundsButton.tooltip = "清理所有已加载场景中全部 TileMap3D Surface 的越界 Tile";
+            outOfBoundsTools.Add(clearAllOutOfBoundsButton);
+            section.body.Add(outOfBoundsTools);
             var actions = new VisualElement();
             actions.style.flexDirection = FlexDirection.Row;
             actions.style.flexWrap = Wrap.Wrap;
@@ -257,6 +302,7 @@ namespace YokiFrame.Unity.TileMap3D
             }
 
             section.body.Add(actions);
+            RefreshOutOfBoundsTools();
             return section.panel;
         }
 
@@ -286,11 +332,14 @@ namespace YokiFrame.Unity.TileMap3D
                 ? TileMap3DLayerType.Base
                 : TileMap3DLayerType.Overlay;
             var layer = TileMap3DCommands.EnsureLayerComponent(tilemap, defaultType);
-            var typeField = new EnumField(layer != null ? layer.LayerType : defaultType);
-            typeField.style.minWidth = 90f;
-            typeField.tooltip = "Base 写入深度；Overlay 与 Effect 透明叠加";
-            typeField.RegisterValueChangedCallback(evt => ChangeLayerType(tilemap, evt.newValue));
-            row.Add(typeField);
+            var layerType = layer != null ? layer.LayerType : defaultType;
+            var renderTypeField = new PopupField<string>(
+                LayerRenderTypeChoices,
+                layerType == TileMap3DLayerType.Base ? 0 : 1);
+            renderTypeField.style.minWidth = 125f;
+            renderTypeField.tooltip = "渲染类型不限制 Tilemap 层数：每个 Tilemap 都可独立选择 Base 或 Overlay。";
+            renderTypeField.RegisterValueChangedCallback(evt => ChangeLayerRenderType(tilemap, evt.newValue));
+            row.Add(renderTypeField);
             row.Add(CreateSmallButton("编辑", () => SetActiveLayer(tilemap)));
             var deleteButton = CreateSmallButton("×", () => DeleteLayer(tilemap));
             deleteButton.tooltip = "删除该 Tilemap 图层";
@@ -327,6 +376,12 @@ namespace YokiFrame.Unity.TileMap3D
             orientationActions.Add(CreateSecondaryButton(
                 "归一化缩放",
                 NormalizeSurfaceWorldScale));
+            var alignGridButton = CreateSecondaryButton(
+                "对齐世界格网",
+                EnableWorldGridAlignment);
+            alignGridButton.tooltip = "启用持续吸附，并把有效区域左下角对齐到完整世界 Cell";
+            alignGridButton.SetEnabled(surface.SurfaceMode == TileMap3DSurfaceMode.GeneratedGround);
+            orientationActions.Add(alignGridButton);
             section.body.Add(orientationActions);
             return section.panel;
         }
@@ -469,6 +524,9 @@ namespace YokiFrame.Unity.TileMap3D
             var editedSurfaceMode = (TileMap3DSurfaceMode)surfaceModeProperty.enumValueIndex;
             if (editedSurfaceMode == TileMap3DSurfaceMode.GeneratedGround)
             {
+                EditorGUILayout.PropertyField(
+                    serializedSurface.FindProperty("keepWorldGridAligned"),
+                    new GUIContent("保持世界格网对齐"));
                 var thicknessProperty = serializedSurface.FindProperty("thickness");
                 var thickness = EditorGUILayout.DelayedFloatField("厚度", thicknessProperty.floatValue);
                 thicknessProperty.floatValue = Mathf.Max(0.01f, thickness);
@@ -493,6 +551,11 @@ namespace YokiFrame.Unity.TileMap3D
 
             if (EditorGUI.EndChangeCheck())
             {
+                if (editedSurfaceMode == TileMap3DSurfaceMode.GeneratedGround)
+                {
+                    Undo.RecordObject(surface.transform, "修改 TileMap3D 世界格网对齐");
+                }
+
                 bounds.size = new Vector3Int(columns, rows, 1);
                 boundsProperty.boundsIntValue = bounds;
                 cellSizeProperty.floatValue = cellSize;
@@ -509,6 +572,12 @@ namespace YokiFrame.Unity.TileMap3D
 
                 serializedSurface.ApplyModifiedProperties();
                 surface.Rebuild();
+                if (surface.KeepWorldGridAligned)
+                {
+                    surface.AlignToWorldGrid();
+                    EditorUtility.SetDirty(surface.transform);
+                }
+
                 EditorUtility.SetDirty(surface);
                 SceneView.RepaintAll();
                 RefreshStatus();
@@ -615,14 +684,106 @@ namespace YokiFrame.Unity.TileMap3D
         }
 
         /// <summary>
-        /// 修改原生 Tilemap 的 3D 图层职责并立即刷新材质与法线偏移。
+        /// 写入 Scene View 越界 Tile 警示开关，并保留为可撤销的 Surface 配置修改。
         /// </summary>
-        private void ChangeLayerType(Tilemap tilemap, Enum value)
+        private void SetOutOfBoundsPreview(bool visible)
         {
-            if (!(value is TileMap3DLayerType layerType))
+            if (surface == null || surface.ShowOutOfBoundsTilePreview == visible)
             {
                 return;
             }
+
+            Undo.RecordObject(surface, "切换 TileMap3D 越界 Tile 警示");
+            surface.SetOutOfBoundsTilePreviewVisible(visible);
+            EditorUtility.SetDirty(surface);
+            SceneView.RepaintAll();
+            RefreshOutOfBoundsTools();
+        }
+
+        /// <summary>
+        /// 统计后确认清理全部源图层的越界 Tile；清理结果可通过 Unity Undo 恢复。
+        /// </summary>
+        private void ClearOutOfBoundsTiles()
+        {
+            if (surface == null)
+            {
+                return;
+            }
+
+            var count = surface.CountOutOfBoundsTiles();
+            if (count <= 0)
+            {
+                RefreshOutOfBoundsTools();
+                return;
+            }
+
+            if (!EditorUtility.DisplayDialog(
+                    "清理越界 Tile",
+                    "将删除当前 Surface 全部 Tilemap 图层中位于固定区域外的 "
+                    + count + " 个 Tile。此操作可通过 Undo 恢复。",
+                    "清理",
+                    "取消"))
+            {
+                return;
+            }
+
+            var clearedCount = TileMap3DCommands.ClearOutOfBoundsTiles(surface);
+            if (statusLabel != null)
+            {
+                statusLabel.text = clearedCount > 0
+                    ? "已清理 " + clearedCount + " 个越界 Tile"
+                    : "没有需要清理的越界 Tile";
+            }
+
+            RefreshOutOfBoundsTools();
+        }
+
+        /// <summary>
+        /// 统计后确认清理所有已加载场景中的越界 Tile；整次操作可通过一次 Undo 恢复。
+        /// </summary>
+        private void ClearAllOutOfBoundsTilesInLoadedScenes()
+        {
+            var count = TileMap3DCommands.CountOutOfBoundsTilesInLoadedScenes();
+            if (count <= 0)
+            {
+                if (statusLabel != null)
+                {
+                    statusLabel.text = "场景中没有需要清理的越界 Tile";
+                }
+
+                RefreshOutOfBoundsTools();
+                return;
+            }
+
+            if (!EditorUtility.DisplayDialog(
+                    "清理场景中所有越界 Tile",
+                    "将删除所有已加载场景的全部 TileMap3D Surface 中位于固定区域外的 "
+                    + count + " 个 Tile。此操作可通过一次 Undo 恢复。",
+                    "全部清理",
+                    "取消"))
+            {
+                return;
+            }
+
+            var clearedCount = TileMap3DCommands.ClearOutOfBoundsTilesInLoadedScenes();
+            if (statusLabel != null)
+            {
+                statusLabel.text = clearedCount > 0
+                    ? "已清理场景中的 " + clearedCount + " 个越界 Tile"
+                    : "场景中没有需要清理的越界 Tile";
+            }
+
+            RefreshOutOfBoundsTools();
+        }
+
+        /// <summary>
+        /// 修改原生 Tilemap 的渲染类型并立即刷新材质与法线偏移。
+        /// </summary>
+        private void ChangeLayerRenderType(Tilemap tilemap, string value)
+        {
+            var layerType = value == LayerRenderTypeChoices[0]
+                ? TileMap3DLayerType.Base
+                : TileMap3DLayerType.Overlay;
 
             var layer = TileMap3DCommands.EnsureLayerComponent(tilemap, layerType);
             if (layer == null)
@@ -630,7 +791,7 @@ namespace YokiFrame.Unity.TileMap3D
                 return;
             }
 
-            Undo.RecordObject(layer, "修改 TileMap3D 图层类型");
+            Undo.RecordObject(layer, "修改 TileMap3D 图层渲染类型");
             layer.Configure(layerType);
             EditorUtility.SetDirty(layer);
             if (surface != null)
@@ -675,6 +836,24 @@ namespace YokiFrame.Unity.TileMap3D
         private void NormalizeSurfaceWorldScale()
         {
             TileMap3DCommands.NormalizeSurfaceWorldScale(surface);
+            RefreshStatus();
+        }
+
+        /// <summary>
+        /// 为当前 Generated Ground 启用持续世界格网吸附，并立即修正旧场景中的小数相位。
+        /// </summary>
+        private void EnableWorldGridAlignment()
+        {
+            if (!TileMap3DCommands.EnableWorldGridAlignment(surface))
+            {
+                if (statusLabel != null)
+                {
+                    statusLabel.text = "世界格网对齐仅用于 Generated Ground";
+                }
+
+                return;
+            }
+
             RefreshStatus();
         }
 
@@ -861,6 +1040,30 @@ namespace YokiFrame.Unity.TileMap3D
                 + groundSize.x.ToString("0.###") + " × "
                 + groundSize.y.ToString("0.###") + " | "
                 + surfaceState + " / " + renderState;
+        }
+
+        /// <summary>
+        /// 更新工作台中的越界计数和清理按钮，不改变 Tilemap 或 Surface 数据。
+        /// </summary>
+        private void RefreshOutOfBoundsTools()
+        {
+            if (outOfBoundsStatusLabel == null || clearOutOfBoundsButton == null)
+            {
+                return;
+            }
+
+            if (surface == null || surface.SourceGrid == null)
+            {
+                outOfBoundsStatusLabel.text = "需要源 Grid 才能检查越界 Tile";
+                clearOutOfBoundsButton.SetEnabled(false);
+                return;
+            }
+
+            var count = surface.CountOutOfBoundsTiles();
+            outOfBoundsStatusLabel.text = count > 0
+                ? "越界 Tile：" + count
+                : "未检测到越界 Tile";
+            clearOutOfBoundsButton.SetEnabled(count > 0);
         }
 
         /// <summary>

@@ -30,7 +30,11 @@ Material:
     m_Ints: []
     m_Floats:
     - _Cutoff: 0.1
+    - _TileMap3DAmbientStrength: -1
+    - _TileMap3DPreviewOutside: 0
+    - _TileMap3DReceiveShadows: 0
     m_Colors:
     - _Color: {r: 1, g: 1, b: 1, a: 1}
+    - _TileMap3DPreviewRect: {r: 0, g: 0, b: 0, a: 0}
   m_BuildTextureStacks: []
   m_AllowLocking: 1
