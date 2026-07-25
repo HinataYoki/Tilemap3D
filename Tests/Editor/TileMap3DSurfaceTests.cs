@@ -49,6 +49,27 @@ namespace TileMap3D.Tests
         }
 
         /// <summary>
+        /// 默认材质由 UPM 包自身提供，安装时不应向使用项目创建或修复资源。
+        /// </summary>
+        [Test]
+        public void DefaultMaterials_AreLoadedFromPackagedResources()
+        {
+            var baseMaterial = Resources.Load<Material>("TileMap3D/TileMap3DBase");
+            var overlayMaterial = Resources.Load<Material>("TileMap3D/TileMap3DOverlay");
+            var surfaceMaterial = Resources.Load<Material>("TileMap3D/TileMap3DSurfaceMaterial");
+
+            Assert.That(baseMaterial, Is.Not.Null);
+            Assert.That(overlayMaterial, Is.Not.Null);
+            Assert.That(surfaceMaterial, Is.Not.Null);
+            Assert.That(baseMaterial.shader, Is.Not.Null);
+            Assert.That(overlayMaterial.shader, Is.Not.Null);
+            Assert.That(surfaceMaterial.shader, Is.Not.Null);
+            Assert.That(baseMaterial.shader.name, Is.EqualTo("TileMap3D/TilemapSurfaceCutout"));
+            Assert.That(overlayMaterial.shader.name, Is.EqualTo("TileMap3D/TilemapSurfaceTransparent"));
+            Assert.That(surfaceMaterial.shader.name, Is.EqualTo("TileMap3D/SurfaceMaterial"));
+        }
+
+        /// <summary>
         /// Overlay Surface 只承载 Tilemap，不应向任意目标对象注入地面组件。
         /// </summary>
         [Test]
