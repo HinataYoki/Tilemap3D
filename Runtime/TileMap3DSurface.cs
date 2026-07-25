@@ -2,8 +2,6 @@ using System;
 using System.Collections.Generic;
 #if UNITY_EDITOR
 using UnityEditor;
-using UnityEditor.SceneManagement;
-using UnityEngine.SceneManagement;
 #endif
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -21,33 +19,12 @@ namespace YokiFrame.Unity.TileMap3D
     }
 
     /// <summary>
-    /// 控制原生 TilemapRenderer 与静态烘焙材质的运行时选择。
-    /// </summary>
-    public enum TileMap3DRenderMode
-    {
-        BakedTexture,
-        NativeTilemap,
-        SurfaceMaterial
-    }
-
-    /// <summary>
     /// 控制 3D 地面尺寸的来源。
     /// </summary>
     public enum TileMap3DSizeMode
     {
         TilemapRegion,
         Custom
-    }
-
-    /// <summary>
-    /// 控制烘焙贴图的 Unity 导入压缩等级。
-    /// </summary>
-    public enum TileMap3DTextureCompression
-    {
-        Uncompressed,
-        LowQuality,
-        NormalQuality,
-        HighQuality
     }
 
     /// <summary>
@@ -58,18 +35,13 @@ namespace YokiFrame.Unity.TileMap3D
     public sealed class TileMap3DSurface : MonoBehaviour
     {
         private const string BakedSurfaceShaderName = "TileMap3D/BakedSurface";
-        private const int CurrentLayoutVersion = 5;
+        private const int CurrentLayoutVersion = 7;
         private const float MinimumCellSize = 0.01f;
         private const float MinimumThickness = 0.01f;
         private const float MinimumSurfaceSize = 0.01f;
-        private const float MinimumSurfaceOffset = 0.0001f;
+        private const float MinimumSurfaceOffset = 0f;
         private const float MinimumLayerSpacing = 0.0001f;
         private const float GridCenterTolerance = 0.0001f;
-        private const int MinimumPixelsPerCell = 4;
-        private const int MaximumPixelsPerCell = 2048;
-        private const int MinimumBakeTextureSize = 32;
-        private const int MaximumBakeTextureSize = 16384;
-        private const string DefaultOutputFolder = "Assets/TileMap3DGenerated";
 #if UNITY_EDITOR
         private const float OutOfBoundsGizmoFillRatio = 0.86f;
         private const float OutOfBoundsGizmoDepthRatio = 0.04f;
@@ -83,7 +55,6 @@ namespace YokiFrame.Unity.TileMap3D
         [SerializeField] private TileMap3DSurfaceProfile surfaceProfile;
         [SerializeField] private Tilemap surfaceQueryLayer;
         [SerializeField] private TileMap3DSurfaceMode surfaceMode = TileMap3DSurfaceMode.Overlay;
-        [SerializeField] private TileMap3DRenderMode renderMode = TileMap3DRenderMode.NativeTilemap;
         [SerializeField, HideInInspector] private bool automaticBounds;
         [SerializeField] private BoundsInt bakeBounds = new BoundsInt(0, 0, 0, 8, 8, 1);
         [SerializeField, Min(MinimumCellSize)] private float cellSize = 1f;
@@ -91,31 +62,14 @@ namespace YokiFrame.Unity.TileMap3D
         [SerializeField, HideInInspector] private TileMap3DSizeMode sizeMode = TileMap3DSizeMode.TilemapRegion;
         [SerializeField, HideInInspector] private Vector2 customSize = new Vector2(8f, 8f);
         [SerializeField, HideInInspector] private int layoutVersion = CurrentLayoutVersion;
-        [SerializeField, Min(MinimumSurfaceOffset)] private float surfaceOffset = 0.015f;
+        [SerializeField, Min(MinimumSurfaceOffset)] private float surfaceOffset = 0f;
         [SerializeField, Min(MinimumLayerSpacing)] private float layerSpacing = 0.002f;
         [SerializeField, Min(MinimumThickness)] private float thickness = 0.5f;
         [SerializeField] private Color surfaceColor = Color.white;
+        [SerializeField] private Material groundMaterial;
         [SerializeField] private Material sideMaterial;
         [SerializeField] private bool showSourcePreview = true;
         [SerializeField] private bool showOutOfBoundsTilePreview;
-
-        [SerializeField, Range(MinimumPixelsPerCell, MaximumPixelsPerCell)]
-        private int pixelsPerCell = 128;
-
-        [SerializeField, Range(MinimumBakeTextureSize, MaximumBakeTextureSize)]
-        private int maximumTextureSize = 4096;
-
-        [SerializeField] private FilterMode bakeFilterMode = FilterMode.Bilinear;
-        [SerializeField] private bool generateMipMaps = true;
-        [SerializeField] private TileMap3DTextureCompression textureCompression =
-            TileMap3DTextureCompression.HighQuality;
-        [SerializeField] private bool hideSourceAfterBake = true;
-        [SerializeField] private string outputFolder = DefaultOutputFolder;
-
-        [SerializeField, HideInInspector] private Texture2D bakedTexture;
-        [SerializeField, HideInInspector] private Material bakedMaterial;
-        [SerializeField, HideInInspector] private BoundsInt lastBakedBounds;
-        [SerializeField, HideInInspector] private string bakeId;
 
         [NonSerialized] private Mesh generatedMesh;
         [NonSerialized] private Material placeholderMaterial;
@@ -132,9 +86,7 @@ namespace YokiFrame.Unity.TileMap3D
 #endif
         [NonSerialized] private bool hasMixedSourceTileSizes;
         [NonSerialized] private string sourceTileSizeWarning;
-        [NonSerialized] private TileMap3DSurfaceMaterialBackend surfaceMaterialBackend;
-        [NonSerialized] private bool surfaceMaterialFallbackActive;
-        [NonSerialized] private string surfaceMaterialWarning;
+        [NonSerialized] private Tilemap[] sourceTilemapsCache;
         [NonSerialized] private bool outOfBoundsTileCacheDirty = true;
         [NonSerialized] private List<Vector3Int> outOfBoundsTilePositions;
         [SerializeField, HideInInspector] private bool ownsGeneratedGeometry;
@@ -143,7 +95,6 @@ namespace YokiFrame.Unity.TileMap3D
         public TileMap3DSurfaceProfile SurfaceProfile => surfaceProfile;
         public Tilemap SurfaceQueryLayer => surfaceQueryLayer;
         public TileMap3DSurfaceMode SurfaceMode => surfaceMode;
-        public TileMap3DRenderMode RenderMode => renderMode;
         public bool AutomaticBounds => automaticBounds;
         public TileMap3DSizeMode SizeMode => sizeMode;
         public int Columns => GetBakeBounds().size.x;
@@ -153,38 +104,21 @@ namespace YokiFrame.Unity.TileMap3D
         public bool KeepWorldGridAligned => keepWorldGridAligned;
         public Vector2 SourceTileSize => GetSourceGridCellSize();
         public string SourceTileSizeWarning => sourceTileSizeWarning;
-        public string SurfaceMaterialWarning => surfaceMaterialWarning;
-        public bool IsSurfaceMaterialActive => renderMode == TileMap3DRenderMode.SurfaceMaterial
-            && !surfaceMaterialFallbackActive
-            && surfaceMaterialBackend != null
-            && surfaceMaterialBackend.IsActive;
         public float SurfaceOffset => surfaceOffset;
         public float LayerSpacing => layerSpacing;
         public float Thickness => thickness;
         public Color SurfaceColor => surfaceColor;
-        public int PixelsPerCell => pixelsPerCell;
-        public int MaximumTextureSize => maximumTextureSize;
-        public FilterMode BakeFilterMode => bakeFilterMode;
-        public bool GenerateMipMaps => generateMipMaps;
-        public TileMap3DTextureCompression TextureCompression => textureCompression;
-        public bool HideSourceAfterBake => hideSourceAfterBake;
-        public string OutputFolder => outputFolder;
-        public Texture2D BakedTexture => bakedTexture;
-        public Material BakedMaterial => bakedMaterial;
-        public BoundsInt LastBakedBounds => lastBakedBounds;
+        public Material GroundMaterial => groundMaterial;
         public bool ShowSourcePreview => showSourcePreview;
         public bool ShowOutOfBoundsTilePreview => showOutOfBoundsTilePreview;
 
         /// <summary>
-        /// 配置新建 Surface 的承载方式和默认渲染模式，不迁移已有 Tile 数据。
+        /// 配置新建 Surface 的承载方式，不迁移已有 Tile 数据。
         /// </summary>
-        public void ConfigureForCreation(
-            TileMap3DSurfaceMode newSurfaceMode,
-            TileMap3DRenderMode newRenderMode)
+        public void ConfigureForCreation(TileMap3DSurfaceMode newSurfaceMode)
         {
             surfaceMode = newSurfaceMode;
-            renderMode = newRenderMode;
-            showSourcePreview = newRenderMode == TileMap3DRenderMode.NativeTilemap;
+            showSourcePreview = true;
             showOutOfBoundsTilePreview = true;
             keepWorldGridAligned = newSurfaceMode == TileMap3DSurfaceMode.GeneratedGround;
             layoutVersion = CurrentLayoutVersion;
@@ -204,52 +138,7 @@ namespace YokiFrame.Unity.TileMap3D
             }
 
             surfaceMode = value;
-            if (surfaceMode == TileMap3DSurfaceMode.Overlay)
-            {
-                renderMode = TileMap3DRenderMode.SurfaceMaterial;
-                showSourcePreview = false;
-            }
-            else if (renderMode == TileMap3DRenderMode.SurfaceMaterial)
-            {
-                renderMode = TileMap3DRenderMode.NativeTilemap;
-                showSourcePreview = true;
-            }
-
-            Rebuild();
-        }
-
-        /// <summary>
-        /// 切换原生 Tilemap 或静态烘焙材质，并同步预览可见性。
-        /// </summary>
-        public void SetRenderMode(TileMap3DRenderMode value)
-        {
-            if (surfaceMode == TileMap3DSurfaceMode.Overlay
-                && value == TileMap3DRenderMode.BakedTexture)
-            {
-                value = TileMap3DRenderMode.SurfaceMaterial;
-            }
-            else if (surfaceMode == TileMap3DSurfaceMode.GeneratedGround
-                && value == TileMap3DRenderMode.SurfaceMaterial)
-            {
-                value = TileMap3DRenderMode.NativeTilemap;
-            }
-
-            if (renderMode == value)
-            {
-                return;
-            }
-
-            renderMode = value;
-            if (renderMode == TileMap3DRenderMode.NativeTilemap)
-            {
-                showSourcePreview = true;
-            }
-            else if (renderMode == TileMap3DRenderMode.SurfaceMaterial)
-            {
-                showSourcePreview = false;
-            }
-
-            ApplySourcePreviewVisibility();
+            showSourcePreview = true;
             Rebuild();
         }
 
@@ -436,6 +325,7 @@ namespace YokiFrame.Unity.TileMap3D
             }
 
             sourceGrid = value;
+            sourceTilemapsCache = null;
             SynchronizeSourceTileSizeFromExistingTiles();
             ApplySourceGridTransform();
             ApplySourcePreviewVisibility();
@@ -598,9 +488,15 @@ namespace YokiFrame.Unity.TileMap3D
         /// </summary>
         public Tilemap[] GetSourceTilemaps(bool includeInactive = true)
         {
-            return sourceGrid != null
+            if (sourceTilemapsCache != null)
+            {
+                return sourceTilemapsCache;
+            }
+
+            sourceTilemapsCache = sourceGrid != null
                 ? sourceGrid.GetComponentsInChildren<Tilemap>(includeInactive)
                 : Array.Empty<Tilemap>();
+            return sourceTilemapsCache;
         }
 
         /// <summary>
@@ -940,34 +836,21 @@ namespace YokiFrame.Unity.TileMap3D
 
         /// <summary>
         /// 写入持久化烘焙产物，并按设置隐藏原生 Tilemap 预览。
+        /// 已废弃：BakedTexture 渲染模式已移除，保留此方法签名以避免旧代码编译报错。
         /// </summary>
+        [System.Obsolete("BakedTexture 模式已移除，此方法不再执行任何操作。")]
         public void ApplyBakeOutput(Texture2D texture, Material material, BoundsInt bounds, string id)
         {
-            bakedTexture = texture;
-            bakedMaterial = material;
-            lastBakedBounds = NormalizeBounds(bounds);
-            bakeId = id;
-            renderMode = TileMap3DRenderMode.BakedTexture;
-            if (hideSourceAfterBake)
-            {
-                showSourcePreview = false;
-            }
-
-            ApplySourcePreviewVisibility();
-            Rebuild();
         }
 
         /// <summary>
-        /// 返回用于稳定生成资源文件名的组件标识；首次烘焙时创建。
+        /// 返回用于稳定生成资源文件名的组件标识。
+        /// 已废弃：BakedTexture 渲染模式已移除。
         /// </summary>
+        [System.Obsolete("BakedTexture 模式已移除，此方法不再执行任何操作。")]
         public string EnsureBakeId()
         {
-            if (string.IsNullOrEmpty(bakeId))
-            {
-                bakeId = Guid.NewGuid().ToString("N");
-            }
-
-            return bakeId;
+            return string.Empty;
         }
 
         /// <summary>
@@ -978,8 +861,6 @@ namespace YokiFrame.Unity.TileMap3D
             Tilemap.tilemapTileChanged -= HandleTilemapChanged;
             Tilemap.tilemapTileChanged += HandleTilemapChanged;
 #if UNITY_EDITOR
-            EditorSceneManager.sceneSaved -= HandleSceneSaved;
-            EditorSceneManager.sceneSaved += HandleSceneSaved;
             Undo.undoRedoPerformed -= HandleUndoRedo;
             Undo.undoRedoPerformed += HandleUndoRedo;
 #endif
@@ -995,17 +876,12 @@ namespace YokiFrame.Unity.TileMap3D
         {
             Tilemap.tilemapTileChanged -= HandleTilemapChanged;
 #if UNITY_EDITOR
-            EditorSceneManager.sceneSaved -= HandleSceneSaved;
             Undo.undoRedoPerformed -= HandleUndoRedo;
             CancelDelayedEditorRebuild();
             worldGridTransformInitialized = false;
 #endif
             rebuildRequested = false;
             synchronizeSourceTileSizeOnRebuild = false;
-            if (surfaceMaterialBackend != null)
-            {
-                surfaceMaterialBackend.Suspend();
-            }
         }
 
         /// <summary>
@@ -1017,10 +893,6 @@ namespace YokiFrame.Unity.TileMap3D
             MaintainWorldGridAlignmentInEditor();
 #endif
             ProcessRequestedRebuild();
-            if (surfaceMaterialBackend != null && !surfaceMaterialFallbackActive)
-            {
-                surfaceMaterialBackend.Update();
-            }
         }
 
         /// <summary>
@@ -1038,6 +910,7 @@ namespace YokiFrame.Unity.TileMap3D
         /// </summary>
         private void OnTransformChildrenChanged()
         {
+            sourceTilemapsCache = null;
             InvalidateOutOfBoundsTileCache();
             RequestRebuild(true);
         }
@@ -1049,12 +922,9 @@ namespace YokiFrame.Unity.TileMap3D
         {
             Tilemap.tilemapTileChanged -= HandleTilemapChanged;
 #if UNITY_EDITOR
-            EditorSceneManager.sceneSaved -= HandleSceneSaved;
             Undo.undoRedoPerformed -= HandleUndoRedo;
             CancelDelayedEditorRebuild();
 #endif
-            ReleaseSurfaceMaterialBackend();
-            TileMap3DSurfaceMaterialBackend.ReleaseRendererObjectsOwnedBy(this);
             ReleaseGeneratedObject(generatedMesh);
             ReleaseGeneratedObject(placeholderMaterial);
             ReleaseGeneratedObject(defaultSideMaterial);
@@ -1103,23 +973,7 @@ namespace YokiFrame.Unity.TileMap3D
         }
 
         /// <summary>
-        /// 自身场景保存完成后延迟恢复临时材质参数，避开 Unity 的序列化一致性检查阶段。
-        /// </summary>
-        private void HandleSceneSaved(Scene savedScene)
-        {
-            if (this == null
-                || gameObject.scene != savedScene
-                || surfaceMode != TileMap3DSurfaceMode.Overlay
-                || renderMode != TileMap3DRenderMode.SurfaceMaterial)
-            {
-                return;
-            }
-
-            RequestRebuild(false);
-        }
-
-        /// <summary>
-        /// Undo 或 Redo 恢复 Tilemap 数据后使越界缓存失效；已有 Tilemap 变更事件继续负责渲染后端刷新。
+        /// Undo 或 Redo 恢复 Tilemap 数据后使越界缓存失效。
         /// </summary>
         private void HandleUndoRedo()
         {
@@ -1219,8 +1073,12 @@ namespace YokiFrame.Unity.TileMap3D
             }
 
             InvalidateOutOfBoundsTileCache();
-            SynchronizeSourceTileSizeFromChangedTiles(changedTiles);
-            RequestRebuild();
+            // NativeTilemap: TilemapRenderer が visual updates natively；
+            // 只有检测到 Tile 尺寸变化时才需要重建（Grid Scale 需要同步）。
+            if (SynchronizeSourceTileSizeFromChangedTiles(changedTiles))
+            {
+                RequestRebuild();
+            }
         }
 
         /// <summary>
@@ -1228,30 +1086,8 @@ namespace YokiFrame.Unity.TileMap3D
         /// </summary>
         private void RebuildInternal()
         {
-            surfaceMaterialFallbackActive = false;
-            surfaceMaterialWarning = string.Empty;
             ApplySourceGridTransform();
             ApplyLayerRendererSettings();
-            if (surfaceMode == TileMap3DSurfaceMode.Overlay
-                && renderMode == TileMap3DRenderMode.SurfaceMaterial)
-            {
-                if (surfaceMaterialBackend == null)
-                {
-                    surfaceMaterialBackend = new TileMap3DSurfaceMaterialBackend(this);
-                }
-
-                if (!surfaceMaterialBackend.Rebuild())
-                {
-                    surfaceMaterialFallbackActive = true;
-                    surfaceMaterialWarning = surfaceMaterialBackend.Warning;
-                    ApplySourceGridTransform();
-                }
-            }
-            else
-            {
-                ReleaseSurfaceMaterialBackend();
-            }
-
             ApplySourcePreviewVisibility();
             if (surfaceMode == TileMap3DSurfaceMode.Overlay)
             {
@@ -1286,11 +1122,7 @@ namespace YokiFrame.Unity.TileMap3D
             generatedMesh.RecalculateTangents();
             generatedMesh.RecalculateBounds();
 
-            var topMaterial = renderMode == TileMap3DRenderMode.BakedTexture
-                && !showSourcePreview
-                && bakedMaterial != null
-                ? bakedMaterial
-                : GetPlaceholderMaterial();
+            var topMaterial = groundMaterial != null ? groundMaterial : GetPlaceholderMaterial();
             meshFilter.sharedMesh = generatedMesh;
             meshRenderer.sharedMaterials = new[]
             {
@@ -1308,23 +1140,6 @@ namespace YokiFrame.Unity.TileMap3D
                 (minimumZ + maximumZ) * 0.5f);
             boxCollider.size = new Vector3(width, thickness, depth);
             boxCollider.enabled = true;
-        }
-
-        /// <summary>
-        /// 释放 SurfaceMaterial 的隐藏同 Mesh Renderer 与按格 GPU 数据。
-        /// </summary>
-        private void ReleaseSurfaceMaterialBackend()
-        {
-            if (surfaceMaterialBackend == null)
-            {
-                TileMap3DSurfaceMaterialBackend.ReleaseRendererObjectsOwnedBy(this);
-                surfaceMaterialFallbackActive = false;
-                return;
-            }
-
-            surfaceMaterialBackend.Dispose();
-            surfaceMaterialBackend = null;
-            surfaceMaterialFallbackActive = false;
         }
 
         /// <summary>
@@ -1668,9 +1483,6 @@ namespace YokiFrame.Unity.TileMap3D
         /// </summary>
         private void ApplySourcePreviewVisibility()
         {
-            var showNativeRenderer = renderMode == TileMap3DRenderMode.SurfaceMaterial
-                ? surfaceMaterialFallbackActive
-                : showSourcePreview;
             var tilemaps = GetSourceTilemaps(true);
             for (var i = 0; i < tilemaps.Length; i++)
             {
@@ -1683,13 +1495,13 @@ namespace YokiFrame.Unity.TileMap3D
                 var tilemapRenderer = tilemap.GetComponent<TilemapRenderer>();
                 if (tilemapRenderer != null)
                 {
-                    tilemapRenderer.forceRenderingOff = !showNativeRenderer;
+                    tilemapRenderer.forceRenderingOff = !showSourcePreview;
                 }
             }
         }
 
         /// <summary>
-        /// 约束序列化参数，防止零尺寸 Mesh、非法区域和项目外输出路径。
+        /// 约束序列化参数，防止零尺寸 Mesh 和非法区域。
         /// </summary>
         private void EnsureSerializedValues()
         {
@@ -1700,33 +1512,9 @@ namespace YokiFrame.Unity.TileMap3D
             sizeMode = TileMap3DSizeMode.TilemapRegion;
             customSize.x = Mathf.Max(MinimumSurfaceSize, customSize.x);
             customSize.y = Mathf.Max(MinimumSurfaceSize, customSize.y);
-            if (surfaceMode == TileMap3DSurfaceMode.Overlay
-                && renderMode == TileMap3DRenderMode.BakedTexture)
-            {
-                renderMode = TileMap3DRenderMode.SurfaceMaterial;
-            }
-            else if (surfaceMode == TileMap3DSurfaceMode.GeneratedGround
-                && renderMode == TileMap3DRenderMode.SurfaceMaterial)
-            {
-                renderMode = TileMap3DRenderMode.NativeTilemap;
-            }
-
             surfaceOffset = Mathf.Max(MinimumSurfaceOffset, surfaceOffset);
             layerSpacing = Mathf.Max(MinimumLayerSpacing, layerSpacing);
             thickness = Mathf.Max(MinimumThickness, thickness);
-            pixelsPerCell = Mathf.Clamp(pixelsPerCell, MinimumPixelsPerCell, MaximumPixelsPerCell);
-            maximumTextureSize = Mathf.Clamp(
-                maximumTextureSize,
-                MinimumBakeTextureSize,
-                MaximumBakeTextureSize);
-            if (string.IsNullOrWhiteSpace(outputFolder) || !outputFolder.Replace('\\', '/').StartsWith("Assets/"))
-            {
-                outputFolder = DefaultOutputFolder;
-            }
-            else
-            {
-                outputFolder = outputFolder.Replace('\\', '/').TrimEnd('/');
-            }
         }
 
         /// <summary>
@@ -1754,21 +1542,26 @@ namespace YokiFrame.Unity.TileMap3D
             if (layoutVersion < 2)
             {
                 surfaceMode = TileMap3DSurfaceMode.GeneratedGround;
-                renderMode = TileMap3DRenderMode.BakedTexture;
-                surfaceOffset = Mathf.Max(MinimumSurfaceOffset, surfaceOffset);
+                surfaceOffset = 0f;
                 layerSpacing = Mathf.Max(MinimumLayerSpacing, layerSpacing);
             }
 
-            if (layoutVersion < 3 && surfaceMode == TileMap3DSurfaceMode.Overlay
-                && renderMode == TileMap3DRenderMode.BakedTexture)
+            if (layoutVersion < 3 && surfaceMode == TileMap3DSurfaceMode.Overlay)
             {
-                renderMode = TileMap3DRenderMode.NativeTilemap;
+                showSourcePreview = true;
             }
 
             if (layoutVersion < 5)
             {
                 // Generated Ground 与 Overlay 默认共享同一世界格网相位，旧地面升级后也立即恢复该契约。
                 keepWorldGridAligned = surfaceMode == TileMap3DSurfaceMode.GeneratedGround;
+            }
+
+            if (layoutVersion < 6)
+            {
+                // BakedTexture/SurfaceMaterial 旧场景：强制显示原生 Tilemap，归零表面偏移。
+                showSourcePreview = true;
+                surfaceOffset = 0f;
             }
 
             layoutVersion = CurrentLayoutVersion;
@@ -1843,11 +1636,12 @@ namespace YokiFrame.Unity.TileMap3D
         /// <summary>
         /// 仅在本次 Tile 变化包含不同原始尺寸时扫描整张源地图，正常绘制不产生额外遍历。
         /// </summary>
-        private void SynchronizeSourceTileSizeFromChangedTiles(Tilemap.SyncTile[] changedTiles)
+        /// <returns>true 当检测到 Tile 尺寸变化并已执行全图扫描时。</returns>
+        private bool SynchronizeSourceTileSizeFromChangedTiles(Tilemap.SyncTile[] changedTiles)
         {
             if (changedTiles == null || changedTiles.Length == 0)
             {
-                return;
+                return false;
             }
 
             var current = GetSourceGridCellSize();
@@ -1871,7 +1665,10 @@ namespace YokiFrame.Unity.TileMap3D
             if (requiresFullScan || !foundSprite && hasMixedSourceTileSizes)
             {
                 SynchronizeSourceTileSizeFromExistingTiles();
+                return true;
             }
+
+            return false;
         }
 
         /// <summary>
@@ -2109,10 +1906,7 @@ namespace YokiFrame.Unity.TileMap3D
             if (sourceGrid.transform.IsChildOf(transform))
             {
                 var localPosition = sourceGrid.transform.localPosition;
-                localPosition.y = renderMode == TileMap3DRenderMode.SurfaceMaterial
-                    && !surfaceMaterialFallbackActive
-                    ? 0f
-                    : surfaceOffset;
+                localPosition.y = surfaceOffset;
                 if (sourceGrid.transform.localPosition != localPosition)
                 {
                     sourceGrid.transform.localPosition = localPosition;

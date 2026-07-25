@@ -41,6 +41,7 @@ namespace YokiFrame.Unity.TileMap3D
             AddProperty(root, "layerSpacing", "图层间距");
             if (surface.SurfaceMode == TileMap3DSurfaceMode.GeneratedGround)
             {
+                AddProperty(root, "groundMaterial", "地面基底材质");
                 AddProperty(root, "sideMaterial", "侧壁材质");
             }
 
@@ -50,26 +51,14 @@ namespace YokiFrame.Unity.TileMap3D
             actions.style.marginTop = Spacing.SM;
             actions.Add(CreatePrimaryButton("打开 TileMap3D", () => TileMap3DWindow.Open(surface)));
             actions.Add(CreateSecondaryButton("重建 Surface", () => RebuildSurface(surface)));
-            var bakeButton = CreateSecondaryButton("烘焙", () => BakeSurface(surface));
-            bakeButton.SetEnabled(surface.SurfaceMode == TileMap3DSurfaceMode.GeneratedGround);
-            actions.Add(bakeButton);
             root.Add(actions);
 
             var tilemapCount = surface.GetSourceTilemaps(true).Length;
-            var renderText = surface.RenderMode == TileMap3DRenderMode.NativeTilemap
-                ? "原生渲染"
-                : surface.RenderMode == TileMap3DRenderMode.SurfaceMaterial
-                    ? surface.IsSurfaceMaterialActive ? "Mesh 表面材质" : "表面材质回退"
-                    : surface.BakedTexture != null ? "烘焙渲染" : "等待烘焙";
+            var renderText = "原生渲染";
             var status = new Label(tilemapCount + " 个 Tilemap 图层 | " + renderText);
             status.style.marginTop = Spacing.SM;
             status.style.color = new StyleColor(Colors.TextSecondary);
             root.Add(status);
-            if (!string.IsNullOrEmpty(surface.SurfaceMaterialWarning))
-            {
-                var warning = new HelpBox(surface.SurfaceMaterialWarning, HelpBoxMessageType.Warning);
-                root.Add(warning);
-            }
             root.Bind(serializedObject);
             return root;
         }
@@ -94,25 +83,6 @@ namespace YokiFrame.Unity.TileMap3D
             Undo.RecordObject(surface, "重建 TileMap3D 地面");
             surface.Rebuild();
             EditorUtility.SetDirty(surface);
-            SceneView.RepaintAll();
-        }
-
-        /// <summary>
-        /// 从 Inspector 执行烘焙，并把失败原因写入 Console。
-        /// </summary>
-        private static void BakeSurface(TileMap3DSurface surface)
-        {
-            var result = TileMap3DBaker.Bake(surface);
-            if (!result.Success)
-            {
-                Debug.LogError(result.Error, surface);
-                return;
-            }
-
-            Debug.Log(
-                "TileMap3D 已烘焙 " + result.Width + " × " + result.Height
-                + "：" + result.TexturePath,
-                surface);
             SceneView.RepaintAll();
         }
     }

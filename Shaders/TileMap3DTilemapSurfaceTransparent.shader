@@ -26,6 +26,7 @@ Shader "TileMap3D/TilemapSurfaceTransparent"
             Cull Off
             ZWrite Off
             ZTest LEqual
+            Offset -1, -1
 
             HLSLPROGRAM
             #pragma target 3.0

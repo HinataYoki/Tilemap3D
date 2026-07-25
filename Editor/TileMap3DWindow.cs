@@ -31,6 +31,7 @@ namespace YokiFrame.Unity.TileMap3D
         private Button clearOutOfBoundsButton;
         private VisualElement content;
         private bool refreshQueued;
+        private SerializedObject cachedSerializedSurface;
 
         /// <summary>
         /// 打开工作台，并优先绑定当前选中的 TileMap3D 地面或其 Tilemap 子对象。
@@ -121,6 +122,7 @@ namespace YokiFrame.Unity.TileMap3D
         private void BindSurface(TileMap3DSurface targetSurface)
         {
             surface = targetSurface;
+            cachedSerializedSurface = surface != null ? new SerializedObject(surface) : null;
             if (!IsOwnedTilemap(activeTilemap))
             {
                 activeTilemap = FindFirstTilemap();
@@ -189,10 +191,6 @@ namespace YokiFrame.Unity.TileMap3D
                 evt => BindSurface(evt.newValue as TileMap3DSurface));
             toolbar.Add(surfaceField);
             toolbar.Add(CreateToolbarButtonWithIcon(KitIcons.REFRESH, "重建", RebuildSurface));
-            var bakeButton = CreateToolbarPrimaryButton("烘焙并应用", BakeSurface);
-            bakeButton.SetEnabled(surface != null
-                && surface.SurfaceMode == TileMap3DSurfaceMode.GeneratedGround);
-            toolbar.Add(bakeButton);
         }
 
         /// <summary>
@@ -222,7 +220,6 @@ namespace YokiFrame.Unity.TileMap3D
 
             scroll.Add(BuildSourceSection());
             scroll.Add(BuildSurfaceSection());
-            scroll.Add(BuildBakeSection());
         }
 
         /// <summary>
@@ -387,27 +384,6 @@ namespace YokiFrame.Unity.TileMap3D
         }
 
         /// <summary>
-        /// 构建贴图分辨率、过滤、压缩、输出目录和烘焙结果设置。
-        /// </summary>
-        private VisualElement BuildBakeSection()
-        {
-            var section = CreateKitSectionPanel(
-                "烘焙输出",
-                "GeneratedGround 的可选静态输出；原生模式无需烘焙",
-                KitIcons.TARGET);
-            section.body.Add(new IMGUIContainer(DrawBakeSettings));
-            var actions = new VisualElement();
-            actions.style.flexDirection = FlexDirection.Row;
-            actions.style.flexWrap = Wrap.Wrap;
-            var bakeButton = CreatePrimaryButton("烘焙并应用", BakeSurface);
-            bakeButton.SetEnabled(surface.SurfaceMode == TileMap3DSurfaceMode.GeneratedGround);
-            actions.Add(bakeButton);
-            actions.Add(CreateSecondaryButton("选择输出目录", ChooseOutputFolder));
-            section.body.Add(actions);
-            return section.panel;
-        }
-
-        /// <summary>
         /// 绘制源 Grid 和 TilemapRenderer 预览开关。
         /// </summary>
         private void DrawSourceSettings()
@@ -417,17 +393,14 @@ namespace YokiFrame.Unity.TileMap3D
                 return;
             }
 
-            var serializedSurface = new SerializedObject(surface);
+            var serializedSurface = cachedSerializedSurface;
+            if (serializedSurface == null) return;
             serializedSurface.Update();
             EditorGUI.BeginChangeCheck();
             EditorGUILayout.PropertyField(serializedSurface.FindProperty("sourceGrid"), new GUIContent("源 Grid"));
-            using (new EditorGUI.DisabledScope(
-                       surface.RenderMode == TileMap3DRenderMode.SurfaceMaterial))
-            {
-                EditorGUILayout.PropertyField(
-                    serializedSurface.FindProperty("showSourcePreview"),
-                    new GUIContent("显示原生 Tilemap"));
-            }
+            EditorGUILayout.PropertyField(
+                serializedSurface.FindProperty("showSourcePreview"),
+                new GUIContent("显示原生 Tilemap"));
 
             EditorGUILayout.PropertyField(
                 serializedSurface.FindProperty("surfaceProfile"),
@@ -468,29 +441,16 @@ namespace YokiFrame.Unity.TileMap3D
                 return;
             }
 
-            var serializedSurface = new SerializedObject(surface);
+            var serializedSurface = cachedSerializedSurface;
+            if (serializedSurface == null) return;
             serializedSurface.Update();
             var surfaceModeProperty = serializedSurface.FindProperty("surfaceMode");
-            var renderModeProperty = serializedSurface.FindProperty("renderMode");
             var boundsProperty = serializedSurface.FindProperty("bakeBounds");
             var cellSizeProperty = serializedSurface.FindProperty("cellSize");
             var bounds = boundsProperty.boundsIntValue;
             EditorGUI.BeginChangeCheck();
             EditorGUILayout.PropertyField(surfaceModeProperty, new GUIContent("承载方式"));
             var selectedSurfaceMode = (TileMap3DSurfaceMode)surfaceModeProperty.enumValueIndex;
-            EditorGUILayout.PropertyField(renderModeProperty, new GUIContent("渲染模式"));
-            var selectedRenderMode = (TileMap3DRenderMode)renderModeProperty.enumValueIndex;
-            if (selectedSurfaceMode == TileMap3DSurfaceMode.Overlay
-                && selectedRenderMode == TileMap3DRenderMode.BakedTexture)
-            {
-                renderModeProperty.enumValueIndex = (int)TileMap3DRenderMode.SurfaceMaterial;
-            }
-            else if (selectedSurfaceMode == TileMap3DSurfaceMode.GeneratedGround
-                && selectedRenderMode == TileMap3DRenderMode.SurfaceMaterial)
-            {
-                renderModeProperty.enumValueIndex = (int)TileMap3DRenderMode.NativeTilemap;
-            }
-
             EditorGUILayout.Space(2f);
             var columns = EditorGUILayout.DelayedIntField("列数", bounds.size.x);
             var rows = EditorGUILayout.DelayedIntField("行数", bounds.size.y);
@@ -508,14 +468,9 @@ namespace YokiFrame.Unity.TileMap3D
 
             var surfaceOffsetProperty = serializedSurface.FindProperty("surfaceOffset");
             var layerSpacingProperty = serializedSurface.FindProperty("layerSpacing");
-            var editedRenderMode = (TileMap3DRenderMode)renderModeProperty.enumValueIndex;
-            using (new EditorGUI.DisabledScope(
-                       editedRenderMode == TileMap3DRenderMode.SurfaceMaterial))
-            {
-                surfaceOffsetProperty.floatValue = Mathf.Max(
-                    0.0001f,
-                    EditorGUILayout.DelayedFloatField("表面偏移", surfaceOffsetProperty.floatValue));
-            }
+            surfaceOffsetProperty.floatValue = Mathf.Max(
+                0f,
+                EditorGUILayout.DelayedFloatField("表面偏移", surfaceOffsetProperty.floatValue));
 
             layerSpacingProperty.floatValue = Mathf.Max(
                 0.0001f,
@@ -534,19 +489,17 @@ namespace YokiFrame.Unity.TileMap3D
                     serializedSurface.FindProperty("surfaceColor"),
                     new GUIContent("地面底色"));
                 EditorGUILayout.PropertyField(
+                    serializedSurface.FindProperty("groundMaterial"),
+                    new GUIContent("地面基底材质"));
+                EditorGUILayout.PropertyField(
                     serializedSurface.FindProperty("sideMaterial"),
                     new GUIContent("侧壁材质"));
             }
             else
             {
-                var overlayMessage = editedRenderMode == TileMap3DRenderMode.SurfaceMaterial
-                    ? "SurfaceMaterial 在目标 Mesh 同一几何上渲染，源 Tilemap 只保存数据；没有物理表面偏移。"
-                    : "NativeTilemap 使用独立 TilemapRenderer 平面和表面偏移作为兼容路径。";
-                EditorGUILayout.HelpBox(overlayMessage, MessageType.Info);
-                if (!string.IsNullOrEmpty(surface.SurfaceMaterialWarning))
-                {
-                    EditorGUILayout.HelpBox(surface.SurfaceMaterialWarning, MessageType.Warning);
-                }
+                EditorGUILayout.HelpBox(
+                    "NativeTilemap：独立 TilemapRenderer 平面，Shader Offset 防止与目标面 z-fighting。",
+                    MessageType.Info);
             }
 
             if (EditorGUI.EndChangeCheck())
@@ -559,17 +512,7 @@ namespace YokiFrame.Unity.TileMap3D
                 bounds.size = new Vector3Int(columns, rows, 1);
                 boundsProperty.boundsIntValue = bounds;
                 cellSizeProperty.floatValue = cellSize;
-                if ((TileMap3DRenderMode)renderModeProperty.enumValueIndex
-                    == TileMap3DRenderMode.NativeTilemap)
-                {
-                    serializedSurface.FindProperty("showSourcePreview").boolValue = true;
-                }
-                else if ((TileMap3DRenderMode)renderModeProperty.enumValueIndex
-                    == TileMap3DRenderMode.SurfaceMaterial)
-                {
-                    serializedSurface.FindProperty("showSourcePreview").boolValue = false;
-                }
-
+                serializedSurface.FindProperty("showSourcePreview").boolValue = true;
                 serializedSurface.ApplyModifiedProperties();
                 surface.Rebuild();
                 if (surface.KeepWorldGridAligned)
@@ -580,55 +523,6 @@ namespace YokiFrame.Unity.TileMap3D
 
                 EditorUtility.SetDirty(surface);
                 SceneView.RepaintAll();
-                RefreshStatus();
-            }
-        }
-
-        /// <summary>
-        /// 绘制每格像素、最大尺寸、纹理导入和持久化产物设置。
-        /// </summary>
-        private void DrawBakeSettings()
-        {
-            if (surface == null)
-            {
-                return;
-            }
-
-            var serializedSurface = new SerializedObject(surface);
-            serializedSurface.Update();
-            EditorGUI.BeginChangeCheck();
-            EditorGUILayout.PropertyField(
-                serializedSurface.FindProperty("pixelsPerCell"),
-                new GUIContent("每格像素"));
-            EditorGUILayout.PropertyField(
-                serializedSurface.FindProperty("maximumTextureSize"),
-                new GUIContent("最大贴图尺寸"));
-            EditorGUILayout.PropertyField(
-                serializedSurface.FindProperty("bakeFilterMode"),
-                new GUIContent("过滤模式"));
-            EditorGUILayout.PropertyField(
-                serializedSurface.FindProperty("generateMipMaps"),
-                new GUIContent("生成 Mipmap"));
-            EditorGUILayout.PropertyField(
-                serializedSurface.FindProperty("textureCompression"),
-                new GUIContent("压缩质量"));
-            EditorGUILayout.PropertyField(
-                serializedSurface.FindProperty("hideSourceAfterBake"),
-                new GUIContent("烘焙后隐藏 Tilemap"));
-            EditorGUILayout.PropertyField(
-                serializedSurface.FindProperty("outputFolder"),
-                new GUIContent("输出目录"));
-
-            using (new EditorGUI.DisabledScope(true))
-            {
-                EditorGUILayout.ObjectField("烘焙贴图", surface.BakedTexture, typeof(Texture2D), false);
-                EditorGUILayout.ObjectField("地面材质", surface.BakedMaterial, typeof(Material), false);
-            }
-
-            if (EditorGUI.EndChangeCheck())
-            {
-                serializedSurface.ApplyModifiedProperties();
-                EditorUtility.SetDirty(surface);
                 RefreshStatus();
             }
         }
@@ -936,73 +830,7 @@ namespace YokiFrame.Unity.TileMap3D
         }
 
         /// <summary>
-        /// 执行 Tilemap 合成并把持久化贴图材质应用到 3D 地面。
-        /// </summary>
-        private void BakeSurface()
-        {
-            if (surface == null)
-            {
-                return;
-            }
-
-            var result = TileMap3DBaker.Bake(surface);
-            if (!result.Success)
-            {
-                statusLabel.text = result.Error;
-                Debug.LogError(result.Error, surface);
-                return;
-            }
-
-            var message = "已烘焙 " + result.Width + " × " + result.Height
-                + "，图层 " + result.LayerCount + "，已应用到 3D 地面";
-            if (!string.IsNullOrEmpty(result.Warning))
-            {
-                message += "；" + result.Warning;
-            }
-
-            statusLabel.text = message;
-            Selection.activeObject = surface.gameObject;
-            SceneView.RepaintAll();
-            ScheduleRefresh();
-        }
-
-        /// <summary>
-        /// 选择 Assets 内的烘焙输出目录并写回组件设置。
-        /// </summary>
-        private void ChooseOutputFolder()
-        {
-            if (surface == null)
-            {
-                return;
-            }
-
-            var selected = EditorUtility.OpenFolderPanel(
-                "选择 TileMap3D 输出目录",
-                Application.dataPath,
-                string.Empty);
-            if (string.IsNullOrEmpty(selected))
-            {
-                return;
-            }
-
-            var normalized = selected.Replace('\\', '/');
-            var assetsRoot = Application.dataPath.Replace('\\', '/');
-            if (!normalized.StartsWith(assetsRoot, StringComparison.OrdinalIgnoreCase))
-            {
-                EditorUtility.DisplayDialog("TileMap3D", "输出目录必须位于当前项目的 Assets 下。", "确定");
-                return;
-            }
-
-            var assetPath = "Assets" + normalized.Substring(assetsRoot.Length);
-            var serializedSurface = new SerializedObject(surface);
-            serializedSurface.FindProperty("outputFolder").stringValue = assetPath.TrimEnd('/');
-            serializedSurface.ApplyModifiedProperties();
-            EditorUtility.SetDirty(surface);
-            ScheduleRefresh();
-        }
-
-        /// <summary>
-        /// 刷新底部状态栏中的源图层、区域和烘焙状态。
+        /// 刷新底部状态栏中的源图层、区域和渲染状态。
         /// </summary>
         private void RefreshStatus()
         {
@@ -1025,11 +853,7 @@ namespace YokiFrame.Unity.TileMap3D
 
             var bounds = surface.GetBakeBounds();
             var layerCount = surface.GetSourceTilemaps(true).Length;
-            var renderState = surface.RenderMode == TileMap3DRenderMode.NativeTilemap
-                ? "原生渲染"
-                : surface.RenderMode == TileMap3DRenderMode.SurfaceMaterial
-                    ? surface.IsSurfaceMaterialActive ? "Mesh 表面材质" : "表面材质回退"
-                    : surface.BakedTexture != null ? "烘焙渲染" : "等待烘焙";
+            var renderState = "原生渲染";
             var surfaceState = surface.SurfaceMode == TileMap3DSurfaceMode.Overlay
                 ? "Overlay"
                 : "生成地面";

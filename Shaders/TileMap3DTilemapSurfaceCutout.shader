@@ -26,6 +26,7 @@ Shader "TileMap3D/TilemapSurfaceCutout"
             Cull Off
             ZWrite On
             ZTest LEqual
+            Offset -1, -1
 
             HLSLPROGRAM
             #pragma target 3.0

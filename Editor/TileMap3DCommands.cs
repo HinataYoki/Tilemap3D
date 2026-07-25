@@ -24,20 +24,29 @@ namespace YokiFrame.Unity.TileMap3D
     internal static class TileMap3DCommands
     {
         private const int LayerSortingStep = 10;
+        private static GameObject sCachedPaintTarget;
+        private static TileMap3DSurface sCachedPaintSurface;
 
         /// <summary>
         /// 监听 Unity Tile Palette 的目标切换与绘制事件，确保烘焙后首次编辑仍有实时预览。
         /// </summary>
         static TileMap3DCommands()
         {
-            GridPaintingState.scenePaintTargetChanged -= ShowSourcePreviewForPaintTarget;
-            GridPaintingState.scenePaintTargetChanged += ShowSourcePreviewForPaintTarget;
-            GridPaintingState.scenePaintTargetEdited -= ShowSourcePreviewForPaintTarget;
-            GridPaintingState.scenePaintTargetEdited += ShowSourcePreviewForPaintTarget;
+            GridPaintingState.scenePaintTargetChanged -= OnPaintTargetChanged;
+            GridPaintingState.scenePaintTargetChanged += OnPaintTargetChanged;
+            GridPaintingState.scenePaintTargetEdited -= OnPaintTargetChanged;
+            GridPaintingState.scenePaintTargetEdited += OnPaintTargetChanged;
             GridPaintingState.brushChanged -= SynchronizePaintTargetFromBrush;
             GridPaintingState.brushChanged += SynchronizePaintTargetFromBrush;
             SceneView.duringSceneGui -= SynchronizePaintTargetFromSceneView;
             SceneView.duringSceneGui += SynchronizePaintTargetFromSceneView;
+        }
+
+        private static void OnPaintTargetChanged(GameObject target)
+        {
+            ShowSourcePreviewForPaintTarget(target);
+            sCachedPaintTarget = null;
+            sCachedPaintSurface = null;
         }
 
         /// <summary>
@@ -488,10 +497,7 @@ namespace YokiFrame.Unity.TileMap3D
             }
 
             var surface = Undo.AddComponent<TileMap3DSurface>(root);
-            var defaultRenderMode = surfaceMode == TileMap3DSurfaceMode.Overlay
-                ? TileMap3DRenderMode.SurfaceMaterial
-                : TileMap3DRenderMode.NativeTilemap;
-            surface.ConfigureForCreation(surfaceMode, defaultRenderMode);
+            surface.ConfigureForCreation(surfaceMode);
             if (surfaceMode != TileMap3DSurfaceMode.Overlay
                 || !surface.TryFitToTargetBounds())
             {
@@ -574,10 +580,15 @@ namespace YokiFrame.Unity.TileMap3D
                 return;
             }
 
-            var surface = paintTarget.GetComponentInParent<TileMap3DSurface>();
-            if (surface != null)
+            if (paintTarget != sCachedPaintTarget)
             {
-                SynchronizeSourceTileSizeFromBrush(surface, GridPaintingState.gridBrush);
+                sCachedPaintTarget = paintTarget;
+                sCachedPaintSurface = paintTarget.GetComponentInParent<TileMap3DSurface>();
+            }
+
+            if (sCachedPaintSurface != null)
+            {
+                SynchronizeSourceTileSizeFromBrush(sCachedPaintSurface, GridPaintingState.gridBrush);
             }
         }
 

@@ -17,5 +17,6 @@
   "dependencies": {
     "com.unity.2d.tilemap": "1.0.0",
     "com.unity.render-pipelines.universal": "17.5.0"
-  }
+  },
+  "_fingerprint": "9f7f1548c48d27e353485391aab4691d219ad741"
 }
