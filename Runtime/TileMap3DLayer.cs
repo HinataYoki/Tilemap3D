@@ -163,10 +163,17 @@ namespace YokiFrame.Unity.TileMap3D
         }
 
         /// <summary>
-        /// 组件销毁时释放仅在默认资源缺失时创建的临时材质。
+        /// 组件销毁时通知所属 Surface 刷新图层列表，并释放仅在默认资源缺失时创建的临时材质。
         /// </summary>
         private void OnDestroy()
         {
+            var surface = GetComponentInParent<TileMap3DSurface>(true);
+            if (surface != null)
+            {
+                surface.InvalidateSourceTilemaps();
+                surface.RequestRebuild();
+            }
+
             if (fallbackMaterial == null)
             {
                 return;
@@ -238,11 +245,12 @@ namespace YokiFrame.Unity.TileMap3D
         /// </summary>
         private void RefreshOwnerSurface()
         {
-            var surface = GetComponentInParent<TileMap3DSurface>();
+            var surface = GetComponentInParent<TileMap3DSurface>(true);
             if (surface != null)
             {
-                // OnValidate 期间创建 SurfaceMaterial 覆盖对象会触发 Unity 的生命周期警告。
-                // 统一交给 Surface 在安全的编辑器回调中重建。
+                // 图层增删或配置变化时同步失效 Surface 的图层缓存；
+                // 重建统一交给 Surface 在安全的编辑器回调中执行，避开 OnValidate 生命周期限制。
+                surface.InvalidateSourceTilemaps();
                 surface.RequestRebuild();
                 return;
             }

@@ -22,3 +22,5 @@
 *.unityproj
 *.sln
 *.suo
+# Claude Code local settings
+.claude/

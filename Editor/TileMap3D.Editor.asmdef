@@ -1,6 +1,6 @@
 {
     "name": "TileMap3D.Editor",
-    "rootNamespace": "TileMap3D",
+    "rootNamespace": "YokiFrame.Unity.TileMap3D",
     "references": [
         "TileMap3D.Runtime",
         "Unity.2D.Tilemap.Editor"

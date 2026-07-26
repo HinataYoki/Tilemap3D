@@ -1,4 +1,5 @@
 using System;
+using UnityEditor;
 using UnityEngine;
 using UnityEngine.UIElements;
 
@@ -18,16 +19,32 @@ namespace YokiFrame.Unity.TileMap3D
             public const float MD = 12f;
         }
 
-        /// <summary>TileMap3D 编辑器的颜色令牌。</summary>
+        /// <summary>TileMap3D 编辑器的颜色令牌，按 Editor Skin 提供明暗两组取值。</summary>
         internal static class Colors
         {
-            public static readonly Color TextPrimary = new Color(0.93f, 0.95f, 0.98f, 1f);
-            public static readonly Color TextSecondary = new Color(0.66f, 0.71f, 0.78f, 1f);
-            public static readonly Color BrandPrimary = new Color(0.20f, 0.62f, 0.95f, 1f);
-            public static readonly Color BorderDefault = new Color(0.20f, 0.25f, 0.32f, 1f);
-            public static readonly Color LayerToolbar = new Color(0.12f, 0.15f, 0.20f, 1f);
-            public static readonly Color Panel = new Color(0.105f, 0.125f, 0.16f, 1f);
-            public static readonly Color PanelHeader = new Color(0.13f, 0.16f, 0.20f, 1f);
+            private static bool DarkSkin => EditorGUIUtility.isProSkin;
+
+            public static Color TextPrimary => DarkSkin
+                ? new Color(0.93f, 0.95f, 0.98f, 1f)
+                : new Color(0.10f, 0.12f, 0.15f, 1f);
+            public static Color TextSecondary => DarkSkin
+                ? new Color(0.66f, 0.71f, 0.78f, 1f)
+                : new Color(0.35f, 0.39f, 0.45f, 1f);
+            public static Color BrandPrimary => DarkSkin
+                ? new Color(0.20f, 0.62f, 0.95f, 1f)
+                : new Color(0.08f, 0.42f, 0.75f, 1f);
+            public static Color BorderDefault => DarkSkin
+                ? new Color(0.20f, 0.25f, 0.32f, 1f)
+                : new Color(0.65f, 0.68f, 0.72f, 1f);
+            public static Color LayerToolbar => DarkSkin
+                ? new Color(0.12f, 0.15f, 0.20f, 1f)
+                : new Color(0.80f, 0.82f, 0.85f, 1f);
+            public static Color Panel => DarkSkin
+                ? new Color(0.105f, 0.125f, 0.16f, 1f)
+                : new Color(0.88f, 0.89f, 0.91f, 1f);
+            public static Color PanelHeader => DarkSkin
+                ? new Color(0.13f, 0.16f, 0.20f, 1f)
+                : new Color(0.82f, 0.84f, 0.87f, 1f);
         }
 
         /// <summary>工作台中使用的短图标文本。</summary>
@@ -36,7 +53,6 @@ namespace YokiFrame.Unity.TileMap3D
             public const string SPATIALKIT = "[T]";
             public const string SETTINGS = "[S]";
             public const string STACK = "[L]";
-            public const string TARGET = "[B]";
             public const string REFRESH = "[R]";
         }
 

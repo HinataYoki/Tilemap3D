@@ -31,7 +31,6 @@ namespace YokiFrame.Unity.TileMap3D
             root.Add(summary);
 
             AddProperty(root, "surfaceMode", "承载方式");
-            AddProperty(root, "renderMode", "渲染模式");
             AddProperty(root, "sourceGrid", "源 Grid");
             AddProperty(root, "surfaceProfile", "地面语义 Profile");
             AddProperty(root, "surfaceQueryLayer", "玩法查询图层");
@@ -53,7 +52,7 @@ namespace YokiFrame.Unity.TileMap3D
             actions.Add(CreateSecondaryButton("重建 Surface", () => RebuildSurface(surface)));
             root.Add(actions);
 
-            var tilemapCount = surface.GetSourceTilemaps(true).Length;
+            var tilemapCount = surface.GetSourceTilemaps().Length;
             var renderText = "原生渲染";
             var status = new Label(tilemapCount + " 个 Tilemap 图层 | " + renderText);
             status.style.marginTop = Spacing.SM;

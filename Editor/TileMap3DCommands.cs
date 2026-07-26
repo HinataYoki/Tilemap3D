@@ -1,6 +1,4 @@
-using System.Collections.Generic;
 using UnityEditor;
-using UnityEditor.SceneManagement;
 using UnityEditor.Tilemaps;
 using UnityEngine;
 using UnityEngine.Tilemaps;
@@ -21,7 +19,7 @@ namespace YokiFrame.Unity.TileMap3D
     /// 提供 TileMap3D 场景对象、原生 Grid 和 Tilemap 图层的标准创建入口。
     /// </summary>
     [InitializeOnLoad]
-    internal static class TileMap3DCommands
+    internal static partial class TileMap3DCommands
     {
         private const int LayerSortingStep = 10;
         private static GameObject sCachedPaintTarget;
@@ -124,11 +122,11 @@ namespace YokiFrame.Unity.TileMap3D
                 return surface.SourceGrid;
             }
 
-            var sourceObject = new GameObject("Tilemap Source");
+            var sourceObject = new GameObject(TileMap3DSurface.SourceGridObjectName);
             Undo.RegisterCreatedObjectUndo(sourceObject, "创建 TileMap3D 源 Grid");
             Undo.SetTransformParent(sourceObject.transform, surface.transform, "挂载 TileMap3D 源 Grid");
             sourceObject.transform.localPosition = new Vector3(0f, surface.SurfaceOffset, 0f);
-            sourceObject.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+            sourceObject.transform.localRotation = TileMap3DSurface.SourceGridLocalRotation;
             sourceObject.transform.localScale = Vector3.one;
             var grid = Undo.AddComponent<Grid>(sourceObject);
             grid.cellSize = Vector3.one;
@@ -149,7 +147,7 @@ namespace YokiFrame.Unity.TileMap3D
             }
 
             var grid = surface.SourceGrid != null ? surface.SourceGrid : CreateSourceGrid(surface);
-            var existingLayers = surface.GetSourceTilemaps(true);
+            var existingLayers = surface.GetSourceTilemaps();
             var desiredName = existingLayers.Length == 0 ? "Base" : "Layer " + (existingLayers.Length + 1);
             var sortingOrder = existingLayers.Length == 0 ? 0 : GetNextSortingOrder(existingLayers);
             var layerType = existingLayers.Length == 0
@@ -274,146 +272,6 @@ namespace YokiFrame.Unity.TileMap3D
         }
 
         /// <summary>
-        /// 以单个 Undo 操作清理当前 Surface 全部图层中超出固定列、行区域的 Tile。
-        /// </summary>
-        public static int ClearOutOfBoundsTiles(TileMap3DSurface surface)
-        {
-            if (surface == null || surface.CountOutOfBoundsTiles() <= 0)
-            {
-                return 0;
-            }
-
-            Undo.IncrementCurrentGroup();
-            var undoGroup = Undo.GetCurrentGroup();
-            Undo.SetCurrentGroupName("清理 TileMap3D 越界 Tile");
-            var clearedCount = ClearOutOfBoundsTilesWithoutUndoGroup(
-                surface,
-                "清理 TileMap3D 越界 Tile");
-            if (clearedCount > 0)
-            {
-                SceneView.RepaintAll();
-            }
-
-            Undo.CollapseUndoOperations(undoGroup);
-            return clearedCount;
-        }
-
-        /// <summary>
-        /// 统计所有已加载场景中全部 TileMap3D Surface 的越界 Tile 数量。
-        /// </summary>
-        public static int CountOutOfBoundsTilesInLoadedScenes()
-        {
-            var surfaces = GetLoadedSceneSurfaces();
-            var count = 0;
-            for (var i = 0; i < surfaces.Count; i++)
-            {
-                count += surfaces[i].CountOutOfBoundsTiles(true);
-            }
-
-            return count;
-        }
-
-        /// <summary>
-        /// 以单个 Undo 操作清理所有已加载场景中全部 Surface 的越界 Tile。
-        /// </summary>
-        public static int ClearOutOfBoundsTilesInLoadedScenes()
-        {
-            var surfaces = GetLoadedSceneSurfaces();
-            var pendingCount = 0;
-            for (var i = 0; i < surfaces.Count; i++)
-            {
-                pendingCount += surfaces[i].CountOutOfBoundsTiles(true);
-            }
-
-            if (pendingCount <= 0)
-            {
-                return 0;
-            }
-
-            const string undoName = "清理场景中所有 TileMap3D 越界 Tile";
-            Undo.IncrementCurrentGroup();
-            var undoGroup = Undo.GetCurrentGroup();
-            Undo.SetCurrentGroupName(undoName);
-            var clearedCount = 0;
-            for (var i = 0; i < surfaces.Count; i++)
-            {
-                clearedCount += ClearOutOfBoundsTilesWithoutUndoGroup(surfaces[i], undoName);
-            }
-
-            if (clearedCount > 0)
-            {
-                SceneView.RepaintAll();
-            }
-
-            Undo.CollapseUndoOperations(undoGroup);
-            return clearedCount;
-        }
-
-        /// <summary>
-        /// 登记指定 Surface 的 Tilemap Undo 后执行清理，由调用方统一管理 Undo 分组。
-        /// </summary>
-        private static int ClearOutOfBoundsTilesWithoutUndoGroup(
-            TileMap3DSurface surface,
-            string undoName)
-        {
-            if (surface == null || surface.CountOutOfBoundsTiles(true) <= 0)
-            {
-                return 0;
-            }
-
-            var tilemaps = surface.GetSourceTilemaps(true);
-            for (var i = 0; i < tilemaps.Length; i++)
-            {
-                if (tilemaps[i] != null)
-                {
-                    Undo.RegisterCompleteObjectUndo(tilemaps[i], undoName);
-                }
-            }
-
-            var clearedCount = surface.ClearOutOfBoundsTiles();
-            if (clearedCount <= 0)
-            {
-                return 0;
-            }
-
-            for (var i = 0; i < tilemaps.Length; i++)
-            {
-                if (tilemaps[i] != null)
-                {
-                    EditorUtility.SetDirty(tilemaps[i]);
-                }
-            }
-
-            surface.Rebuild();
-            EditorUtility.SetDirty(surface);
-            return clearedCount;
-        }
-
-        /// <summary>
-        /// 收集所有已加载普通场景中的 Surface，包含禁用对象并排除 Prefab 资源。
-        /// </summary>
-        private static List<TileMap3DSurface> GetLoadedSceneSurfaces()
-        {
-            var surfaces = new List<TileMap3DSurface>();
-            for (var sceneIndex = 0; sceneIndex < EditorSceneManager.sceneCount; sceneIndex++)
-            {
-                var scene = EditorSceneManager.GetSceneAt(sceneIndex);
-                if (!scene.IsValid() || !scene.isLoaded)
-                {
-                    continue;
-                }
-
-                var rootObjects = scene.GetRootGameObjects();
-                for (var rootIndex = 0; rootIndex < rootObjects.Length; rootIndex++)
-                {
-                    rootObjects[rootIndex].GetComponentsInChildren(true, surfaces);
-                }
-            }
-
-            return surfaces;
-        }
-
-        /// <summary>
         /// 把指定 Tilemap 设为 Unity Tile Palette 的当前场景绘制目标。
         /// </summary>
         public static void SetPaintTarget(Tilemap tilemap, bool openPalette = true)
@@ -518,112 +376,6 @@ namespace YokiFrame.Unity.TileMap3D
             }
 
             return surface;
-        }
-
-        /// <summary>
-        /// 当原生 Tile Palette 开始编辑 TileMap3D 图层时恢复源 Renderer，避免绘制成功但画面不可见。
-        /// </summary>
-        private static void ShowSourcePreviewForPaintTarget(GameObject paintTarget)
-        {
-            if (paintTarget == null)
-            {
-                return;
-            }
-
-            var tilemap = paintTarget.GetComponent<Tilemap>();
-            if (tilemap == null)
-            {
-                return;
-            }
-
-            var surface = tilemap.GetComponentInParent<TileMap3DSurface>();
-            if (surface == null)
-            {
-                return;
-            }
-
-            SynchronizeSourceTileSizeFromBrush(surface, GridPaintingState.gridBrush);
-            if (!surface.ShowSourcePreview)
-            {
-                surface.SetSourcePreviewVisible(true);
-                EditorUtility.SetDirty(surface);
-                SceneView.RepaintAll();
-            }
-        }
-
-        /// <summary>
-        /// 切换 Tile Palette Brush 时按当前场景绘制目标同步源 Tile 原始尺寸。
-        /// </summary>
-        private static void SynchronizePaintTargetFromBrush(GridBrushBase brush)
-        {
-            var paintTarget = GridPaintingState.scenePaintTarget;
-            if (paintTarget == null)
-            {
-                return;
-            }
-
-            var surface = paintTarget.GetComponentInParent<TileMap3DSurface>();
-            if (surface != null)
-            {
-                SynchronizeSourceTileSizeFromBrush(surface, brush);
-            }
-        }
-
-        /// <summary>
-        /// SceneView 重绘时捕获同一个 Default Brush 内部的新选区，确保首笔预览比例正确。
-        /// </summary>
-        private static void SynchronizePaintTargetFromSceneView(SceneView sceneView)
-        {
-            var paintTarget = GridPaintingState.scenePaintTarget;
-            if (paintTarget == null)
-            {
-                return;
-            }
-
-            if (paintTarget != sCachedPaintTarget)
-            {
-                sCachedPaintTarget = paintTarget;
-                sCachedPaintSurface = paintTarget.GetComponentInParent<TileMap3DSurface>();
-            }
-
-            if (sCachedPaintSurface != null)
-            {
-                SynchronizeSourceTileSizeFromBrush(sCachedPaintSurface, GridPaintingState.gridBrush);
-            }
-        }
-
-        /// <summary>
-        /// 使用 Default Brush 记录的 Palette Cell Size 设置源 Grid，不修改 Tile 或 Sprite 资产。
-        /// </summary>
-        private static void SynchronizeSourceTileSizeFromBrush(
-            TileMap3DSurface surface,
-            GridBrushBase brush)
-        {
-            var gridBrush = brush as GridBrush;
-            if (surface == null || gridBrush == null)
-            {
-                return;
-            }
-
-            var pickedCellSize = gridBrush.lastPickedCellSize;
-            if (pickedCellSize.x <= 0f || pickedCellSize.y <= 0f)
-            {
-                return;
-            }
-
-            if (!surface.TrySynchronizeSourceTileSize(
-                    new Vector2(pickedCellSize.x, pickedCellSize.y)))
-            {
-                return;
-            }
-
-            EditorUtility.SetDirty(surface);
-            if (surface.SourceGrid != null)
-            {
-                EditorUtility.SetDirty(surface.SourceGrid);
-            }
-
-            SceneView.RepaintAll();
         }
 
         /// <summary>

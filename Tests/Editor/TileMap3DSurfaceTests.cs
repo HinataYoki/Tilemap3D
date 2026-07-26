@@ -56,13 +56,17 @@ namespace TileMap3D.Tests
         {
             var baseMaterial = Resources.Load<Material>("TileMap3D/TileMap3DBase");
             var overlayMaterial = Resources.Load<Material>("TileMap3D/TileMap3DOverlay");
+            var groundMaterial = Resources.Load<Material>("TileMap3D/TileMap3DGround");
 
             Assert.That(baseMaterial, Is.Not.Null);
             Assert.That(overlayMaterial, Is.Not.Null);
+            Assert.That(groundMaterial, Is.Not.Null);
             Assert.That(baseMaterial.shader, Is.Not.Null);
             Assert.That(overlayMaterial.shader, Is.Not.Null);
+            Assert.That(groundMaterial.shader, Is.Not.Null);
             Assert.That(baseMaterial.shader.name, Is.EqualTo("TileMap3D/TilemapSurfaceCutout"));
             Assert.That(overlayMaterial.shader.name, Is.EqualTo("TileMap3D/TilemapSurfaceTransparent"));
+            Assert.That(groundMaterial.shader.name, Is.EqualTo("TileMap3D/GroundSurface"));
         }
 
         /// <summary>
@@ -121,7 +125,7 @@ namespace TileMap3D.Tests
 
             var gridObject = new GameObject("Grid");
             gridObject.transform.SetParent(root.transform, false);
-            gridObject.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+            gridObject.transform.localRotation = TileMap3DSurface.SourceGridLocalRotation;
             var grid = gridObject.AddComponent<Grid>();
             var baseLayer = CreateLayer(gridObject.transform, "Base", TileMap3DLayerType.Base);
             var overlayLayer = CreateLayer(
@@ -247,7 +251,7 @@ namespace TileMap3D.Tests
             Assert.That(updateMethod, Is.Not.Null);
             updateMethod.Invoke(surface, null);
 
-            var gridOrigin = grid.CellToWorld(surface.GetBakeBounds().min);
+            var gridOrigin = grid.CellToWorld(surface.GetSurfaceBounds().min);
             Assert.That(gridOrigin.x, Is.EqualTo(Mathf.Round(gridOrigin.x)).Within(0.0001f));
             Assert.That(gridOrigin.z, Is.EqualTo(Mathf.Round(gridOrigin.z)).Within(0.0001f));
             Assert.That(root.transform.position.x, Is.EqualTo(1f).Within(0.0001f));
@@ -272,9 +276,9 @@ namespace TileMap3D.Tests
 
             Assert.That(surface.AlignToWorldGrid(), Is.True);
 
-            var gridOrigin = grid.CellToWorld(surface.GetBakeBounds().min);
-            var gridRight = grid.CellToWorld(surface.GetBakeBounds().min + Vector3Int.right) - gridOrigin;
-            var gridUp = grid.CellToWorld(surface.GetBakeBounds().min + Vector3Int.up) - gridOrigin;
+            var gridOrigin = grid.CellToWorld(surface.GetSurfaceBounds().min);
+            var gridRight = grid.CellToWorld(surface.GetSurfaceBounds().min + Vector3Int.right) - gridOrigin;
+            var gridUp = grid.CellToWorld(surface.GetSurfaceBounds().min + Vector3Int.up) - gridOrigin;
             var rightCoordinate = Vector3.Dot(gridOrigin, gridRight.normalized);
             var upCoordinate = Vector3.Dot(gridOrigin, gridUp.normalized);
             Assert.That(
@@ -304,7 +308,7 @@ namespace TileMap3D.Tests
 
             InvokePrivate(surface, "Update");
 
-            var gridOrigin = grid.CellToWorld(surface.GetBakeBounds().min);
+            var gridOrigin = grid.CellToWorld(surface.GetSurfaceBounds().min);
             Assert.That(surface.KeepWorldGridAligned, Is.True);
             Assert.That(gridOrigin.x, Is.EqualTo(Mathf.Round(gridOrigin.x)).Within(0.0001f));
             Assert.That(gridOrigin.z, Is.EqualTo(Mathf.Round(gridOrigin.z)).Within(0.0001f));
@@ -529,9 +533,9 @@ namespace TileMap3D.Tests
         /// </summary>
         private static Tilemap CreateSourceTilemap(TileMap3DSurface surface, out Grid grid)
         {
-            var gridObject = new GameObject("Tilemap Source");
+            var gridObject = new GameObject(TileMap3DSurface.SourceGridObjectName);
             gridObject.transform.SetParent(surface.transform, false);
-            gridObject.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+            gridObject.transform.localRotation = TileMap3DSurface.SourceGridLocalRotation;
             grid = gridObject.AddComponent<Grid>();
             var layer = CreateLayer(gridObject.transform, "Base", TileMap3DLayerType.Base);
             surface.SetSourceGrid(grid);
@@ -586,18 +590,6 @@ namespace TileMap3D.Tests
                 BindingFlags.Instance | BindingFlags.NonPublic);
             Assert.That(field, Is.Not.Null, "找不到测试字段：" + fieldName);
             field.SetValue(target, value);
-        }
-
-        /// <summary>
-        /// 读取生命周期状态字段，确认验证回调只记录了待处理重建请求。
-        /// </summary>
-        private static T GetPrivateField<T>(object target, string fieldName)
-        {
-            var field = target.GetType().GetField(
-                fieldName,
-                BindingFlags.Instance | BindingFlags.NonPublic);
-            Assert.That(field, Is.Not.Null, "找不到测试字段：" + fieldName);
-            return (T)field.GetValue(target);
         }
 
         /// <summary>

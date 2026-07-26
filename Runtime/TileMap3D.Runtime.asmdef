@@ -1,6 +1,6 @@
 {
     "name": "TileMap3D.Runtime",
-    "rootNamespace": "TileMap3D",
+    "rootNamespace": "YokiFrame.Unity.TileMap3D",
     "references": [],
     "includePlatforms": [],
     "excludePlatforms": [],

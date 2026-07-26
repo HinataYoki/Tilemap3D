@@ -3,7 +3,7 @@
   "displayName": "TileMap3D",
   "version": "1.0.0",
   "unity": "6000.0",
-  "description": "A Unity Tilemap extension for rendering editable Tilemaps on 3D planar surfaces.",
+  "description": "A Unity Tilemap extension for rendering editable Tilemaps on 3D planar surfaces using the native TilemapRenderer with custom URP lit materials.",
   "author": {
     "name": "HinataYoki"
   },
@@ -16,7 +16,8 @@
   ],
   "dependencies": {
     "com.unity.2d.tilemap": "1.0.0",
-    "com.unity.render-pipelines.universal": "17.5.0"
-  },
-  "_fingerprint": "9f7f1548c48d27e353485391aab4691d219ad741"
+    "com.unity.render-pipelines.universal": "17.5.0",
+    "com.unity.modules.tilemap": "1.0.0",
+    "com.unity.modules.physics": "1.0.0"
+  }
 }
